@@ -13,6 +13,8 @@ planner had to reconstruct from untyped IR. For each kernel it:
 * checks that write-only payloads agree on their dtype, and that every read
   of a payload typed to its final dtype;
 * collects the cooperative call sites in program order;
+* reads the extent of a ``cuda.coop.numba_mlir`` call's ``cuda.local.array``
+  payload from its constructor's shape, as coop's planner does;
 * binds each site's ``valid_items``, ``oob_default`` and ``offset`` as
   static or runtime by where the value comes from, as coop's planner does,
   and checks them and any scalar ``store`` value by coop's rules;
@@ -50,6 +52,7 @@ from ._plan import Backing, KernelPlan, Region, SitePlan
 from ._templates import (
     CONTROLS,
     OPERATIONS,
+    QUALIFIED_OPERATIONS,
     LoadStoreRequest,
     is_scalar_value,
     is_wrapper_location,
@@ -112,6 +115,7 @@ class _Site:
     request: LoadStoreRequest | None = None
     algorithm: Any = None
     scalar: Any = None
+    qualified: bool = False
 
 
 # Request completion ----------------------------------------------------------
@@ -559,10 +563,79 @@ class CoopStoragePass(nb.Rewrite):
                     and isinstance(stmt.value, nb.ir.Expr)
                     and stmt.value.op == "call"
                 ):
-                    kind = OPERATIONS.get(_callee(self.typemap, stmt.value))
+                    callee = _callee(self.typemap, stmt.value)
+                    kind = OPERATIONS.get(callee)
                     if kind is not None:
-                        sites.append(_Site(label, stmt, kind, line))
+                        sites.append(
+                            _Site(
+                                label,
+                                stmt,
+                                kind,
+                                line,
+                                qualified=callee in QUALIFIED_OPERATIONS,
+                            )
+                        )
         return sites
+
+    def _array_extent(self, site: _Site) -> int | None:
+        """Return the extent of a plain-array payload, read from the IR.
+
+        As in coop's planner, the payload must come, through aliases, from
+        ``cuda.local.array`` calls with a constant integer shape, and they
+        must agree. Return ``None`` for a payload that is not a plain array.
+        """
+
+        var = site.stmt.value.args[2]
+        ty = self.typemap[var.name]
+        if not isinstance(ty, nb.types.Array) or isinstance(ty, ThreadDataType):
+            return None
+        extents, pending, seen = set(), [var], set()
+        while pending:
+            var = pending.pop()
+            if var.name in seen:
+                continue
+            seen.add(var.name)
+            for definition in self.func_ir._definitions.get(var.name, ()):
+                if isinstance(definition, nb.ir.Var):
+                    pending.append(definition)
+                elif isinstance(definition, nb.ir.Expr) and (
+                    definition.op == "cast"
+                ):
+                    pending.append(definition.value)
+                elif isinstance(definition, nb.ir.Expr) and (
+                    definition.op == "phi"
+                ):
+                    pending.extend(definition.incoming_values)
+                else:
+                    extents.add(self._local_array_extent(definition))
+        if None in extents or not extents:
+            raise TypedPipelineError(
+                f"cuda.coop.numba_mlir.{site.kind} requires a static "
+                "items_per_thread extent before provider selection"
+            )
+        if len(extents) > 1:
+            raise TypedPipelineError(
+                "cuda.coop.numba_mlir loop-carried payloads have "
+                "inconsistent items_per_thread extents"
+            )
+        return extents.pop()
+
+    def _local_array_extent(self, definition: Any) -> int | None:
+        if not (
+            isinstance(definition, nb.ir.Expr)
+            and definition.op == "call"
+            and _callee(self.typemap, definition) is nb.cuda.local.array
+        ):
+            return None
+        shape = (
+            definition.args[0]
+            if definition.args
+            else dict(definition.kws).get("shape")
+        )
+        ty = None if shape is None else self.typemap.get(shape.name)
+        if isinstance(ty, nb.types.IntegerLiteral):
+            return ty.literal_value
+        return None
 
     # -- run -----------------------------------------------------------------
 
@@ -619,6 +692,8 @@ class CoopStoragePass(nb.Rewrite):
                 site.kind,
                 [self.typemap[a.name] for a in expr.args],
                 {k: self.typemap[v.name] for k, v in expr.kws},
+                qualified=site.qualified,
+                extent=self._array_extent(site) if site.qualified else None,
             )
             site.scalar = self._store_scalar(site)
             site.request = with_controls(site.request, self._controls(site))
