@@ -59,13 +59,18 @@ class SitePlan:
 
 @dataclass
 class KernelPlan:
-    """Everything the storage pass decided for one kernel."""
+    """Everything the storage pass decided for one kernel.
+
+    ``bundle`` is the number of distinct provider specializations compiled
+    together, in one translation unit, for all of the kernel's sites.
+    """
 
     name: str
     block: tuple[int, int, int] | None = None
     block_source: str = "not requested"
     launch_bounds: int | None = None
     barrier_policy: str = "after-each"
+    bundle: int | None = None
     backing: Backing | None = None
     regions: list[Region] = field(default_factory=list)
     sites: list[SitePlan] = field(default_factory=list)
@@ -96,6 +101,10 @@ def format_plan(plan: KernelPlan) -> str:
         lines.append("  no coop sites")
         return "\n".join(lines) + "\n"
     lines.append(f"  barrier-policy {plan.barrier_policy}")
+    if plan.bundle is not None:
+        lines.append(
+            f"  bundle sites={len(plan.sites)} specializations={plan.bundle}"
+        )
     if plan.backing is not None:
         b = plan.backing
         lines.append(f"  backing {b.kind} size={b.size} align={b.alignment}")
