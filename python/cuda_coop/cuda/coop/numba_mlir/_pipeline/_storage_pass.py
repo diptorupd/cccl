@@ -13,6 +13,9 @@ planner had to reconstruct from untyped IR. For each kernel it:
 * checks that write-only payloads agree on their dtype, and that every read
   of a payload typed to its final dtype;
 * collects the cooperative call sites in program order;
+* binds each site's ``valid_items``, ``oob_default`` and ``offset`` as
+  static or runtime by where the value comes from, as coop's planner does,
+  and checks them and any scalar ``store`` value by coop's rules;
 * reads the launch's block, only when a site needs it;
 * completes each site's request with coop's ``plan_group_primitive``,
   memoized per request and block, and specializes the providers;
@@ -47,6 +50,7 @@ import operator
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any
 
 from . import _bridges as nb
@@ -55,10 +59,13 @@ from ._errors import TypedPipelineError
 from ._lower import SCRATCH_KEYWORD
 from ._plan import Backing, KernelPlan, Region, SitePlan
 from ._templates import (
+    CONTROLS,
     OPERATIONS,
     LoadStoreRequest,
+    is_scalar_value,
     is_wrapper_location,
     request_for,
+    with_controls,
 )
 from ._types import WRITE, ThreadDataType
 
@@ -106,12 +113,24 @@ def use_barrier_policy(policy: str) -> Iterator[None]:
 
 @dataclass(frozen=True)
 class CallEntry:
-    """What lowering emits for one call site."""
+    """What lowering emits for one call site.
+
+    ``operands`` follows ``abi_arguments``, one entry per provider operand:
+
+    ``("scratch",)``
+        the scratch region's pointer;
+    ``("pointer", index)``
+        the data pointer of the call's argument ``index``;
+    ``("box", index, dtype, value)``
+        a one-item array of ``dtype`` holding the scalar argument ``index``,
+        or the static ``value`` when it is not ``None``;
+    ``("value", keyword)``
+        the call's keyword argument, converted to the ABI type.
+    """
 
     symbol: str
     abi_arguments: tuple
-    pointer_arguments: tuple[int, ...]
-    scratch: bool
+    operands: tuple
     barrier_after: bool
     link_items: tuple
 
@@ -137,6 +156,7 @@ class _Site:
     line: int | None
     request: LoadStoreRequest | None = None
     algorithm: Any = None
+    scalar: Any = None
 
 
 # Request completion (C-T7-6) -------------------------------------------------
@@ -163,12 +183,11 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
     from .._lowering import _load_store
     from .._lowering._core import NumbaMlirCoreAdapter
 
-    plan = plan_group_primitive(
-        request.call, LaunchFacts(exact_block_dim=block)
-    )
     try:
-        plan = plan.require_supported()
-    except NotImplementedError as exc:
+        plan = plan_group_primitive(
+            request.call, LaunchFacts(exact_block_dim=block)
+        ).require_supported()
+    except (NotImplementedError, TypeError, ValueError) as exc:
         raise TypedPipelineError(f"coop.{request.kind}: {exc}") from None
     if plan.target is not GroupLoweringTarget.CUB_BLOCK:
         raise TypedPipelineError(
@@ -180,21 +199,22 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
     factory_name = (
         request.kind if storage_free else f"_{request.kind}_with_storage"
     )
-    completed = (
-        getattr(_load_store, factory_name),
-        {
-            "dtype": NumbaMlirCoreAdapter().normalize_dtype(
-                implementation.template_arguments["T"]
-            ),
-            "threads_per_block": block,
-            "items_per_thread": implementation.template_arguments[
-                "ITEMS_PER_THREAD"
-            ],
-            "algorithm": implementation.metadata["algorithm"],
-            "num_valid_items": ArgumentBinding.omitted(),
-            "offset": ArgumentBinding.omitted(),
-        },
-    )
+    omitted = ArgumentBinding.omitted()
+    kwargs = {
+        "dtype": NumbaMlirCoreAdapter().normalize_dtype(
+            implementation.template_arguments["T"]
+        ),
+        "threads_per_block": block,
+        "items_per_thread": implementation.template_arguments[
+            "ITEMS_PER_THREAD"
+        ],
+        "algorithm": implementation.metadata["algorithm"],
+        "num_valid_items": request.binding("valid_items") or omitted,
+        "offset": request.binding("offset") or omitted,
+    }
+    if request.binding("oob_default") is not None:
+        kwargs["oob_default"] = request.binding("oob_default")
+    completed = (getattr(_load_store, factory_name), kwargs)
     _COMPLETIONS[key] = completed
     return completed
 
@@ -237,17 +257,24 @@ def _ignored_parameter(parameter: Any) -> bool:
     )
 
 
+def _inputs(method: Any) -> list:
+    return [p for p in method if not _ignored_parameter(p) and not p.is_output]
+
+
 def _select_method(algorithm: Any, operands: int) -> Any:
     for method in algorithm.parameters:
-        inputs = [
-            p for p in method if not _ignored_parameter(p) and not p.is_output
-        ]
-        if len(inputs) == operands:
+        if len(_inputs(method)) == operands:
             return method
     raise AssertionError(f"{algorithm.c_name} has no {operands}-operand method")
 
 
-def _abi_arguments(method: Any) -> tuple:
+def _operands(method: Any, site: _Site, scratch: bool) -> tuple:
+    """Pair each provider operand with where lowering finds its value.
+
+    Coop's providers take the scratch pointer, the memory pointer, the
+    payload, then the runtime controls in ``CONTROLS`` order.
+    """
+
     from .. import _types as coop_types
 
     pointer_kinds = (
@@ -255,15 +282,48 @@ def _abi_arguments(method: Any) -> tuple:
         coop_types.Array,
         coop_types.PointerReference,
     )
-    arguments = []
-    for parameter in method:
-        if _ignored_parameter(parameter) or parameter.is_output:
-            continue
+    payload = (
+        ("pointer", 2)
+        if site.scalar is None
+        else ("box", 2, site.request.dtype, site.scalar.value)
+    )
+    pointers = [("scratch",)] * scratch + [("pointer", 1), payload]
+    runtime = [
+        ("value", name)
+        for name, binding in site.request.controls
+        if binding.kind.value == "runtime"
+    ]
+    abi_arguments, operands = [], []
+    for parameter in _inputs(method):
         if isinstance(parameter, pointer_kinds):
-            arguments.append(nb.types.CPointer(nb.types.none))
+            abi_arguments.append(nb.types.CPointer(nb.types.none))
+            operands.append(pointers.pop(0))
         else:
-            arguments.append(parameter.dtype())
-    return tuple(arguments)
+            abi_arguments.append(parameter.dtype())
+            operands.append(runtime.pop(0))
+    if pointers or runtime:
+        raise AssertionError(f"{site.algorithm.c_name}: operands left over")
+    return tuple(abi_arguments), tuple(operands)
+
+
+# Controls ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Scalar:
+    """A scalar ``store`` value; ``value`` is ``None`` when it is runtime."""
+
+    value: Any
+
+
+_RUNTIME = object()
+
+
+def _describe(binding: Any) -> str:
+    if binding.kind.value == "runtime":
+        return "runtime"
+    value = binding.value
+    return str(value.item() if hasattr(value, "item") else value)
 
 
 # Checks -----------------------------------------------------------------------
@@ -372,6 +432,164 @@ class CoopStoragePass(nb.Rewrite):
     def apply(self):
         raise AssertionError("CoopStoragePass.match never selects a block")
 
+    # -- controls ----------------------------------------------------------
+
+    def _provenance(self, var: Any) -> Any:
+        """Return ``var``'s static provenance, or ``_RUNTIME``.
+
+        A value is static when coop's planner would call it static: it
+        comes, through aliases, casts and phis, from a constant, a global, a
+        free variable or a literal argument.
+        """
+
+        from .._compiler._scalar_provenance import (
+            try_resolve_static_scalar_provenance,
+        )
+
+        definitions = self.func_ir._definitions
+        arguments = tuple(self.state.args)
+        resolved, scalar = try_resolve_static_scalar_provenance(
+            var,
+            definitions=lambda v: definitions.get(v.name, ()),
+            argument_type=lambda index: (
+                arguments[index] if 0 <= index < len(arguments) else None
+            ),
+        )
+        return scalar if resolved else _RUNTIME
+
+    def _controls(self, site: _Site) -> tuple:
+        """Bind the site's controls as coop's planner binds them.
+
+        Checks follow the planner's ``_rewrite_load_store``: static
+        ``valid_items`` and ``offset`` first, then the integer types of
+        runtime ones, then ``oob_default`` against the payload dtype.
+        """
+
+        from ..._core import ArgumentBinding
+        from .._compiler._parameters import (
+            _validate_common_numeric_dtype,
+            _validate_runtime_integer_dtype,
+            coerce_static_scalar,
+        )
+
+        kind, dtype = site.kind, site.request.dtype
+        keywords = dict(site.stmt.value.kws)
+        found = {}
+        for name in CONTROLS[kind]:
+            var = keywords.get(name)
+            if var is None:
+                continue
+            scalar = self._provenance(var)
+            if scalar is _RUNTIME:
+                found[name] = (_RUNTIME, self.typemap[var.name])
+            elif scalar.value is not None:
+                found[name] = (scalar, None)
+
+        def check(condition: bool, message: str) -> None:
+            if condition:
+                raise TypedPipelineError(message)
+
+        for name in ("valid_items", "offset"):
+            scalar, _ = found.get(name, (None, None))
+            if scalar is None or scalar is _RUNTIME:
+                continue
+            value = scalar.value
+            check(
+                isinstance(value, bool) or not isinstance(value, Integral),
+                f"coop {kind} {name} must be an integer",
+            )
+            if name == "offset":
+                check(
+                    int(value) < 0,
+                    "coop load/store static offset must be nonnegative",
+                )
+                check(
+                    int(value) > (1 << 63) - 1,
+                    "coop load/store static offset must fit a signed 64-bit "
+                    "integer",
+                )
+        for name in ("valid_items", "offset"):
+            scalar, ty = found.get(name, (None, None))
+            if scalar is _RUNTIME:
+                try:
+                    _validate_runtime_integer_dtype(
+                        ty, operation=kind, parameter=name
+                    )
+                except TypeError as exc:
+                    raise TypedPipelineError(str(exc)) from None
+
+        controls = []
+        for name in CONTROLS[kind]:
+            if name not in found:
+                continue
+            scalar, ty = found[name]
+            if scalar is _RUNTIME:
+                if name == "oob_default":
+                    try:
+                        ty = _validate_common_numeric_dtype(
+                            ty, operation="load", parameter="oob_default"
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise TypedPipelineError(str(exc)) from None
+                    check(
+                        ty != dtype,
+                        "cuda.coop.numba_mlir.load runtime oob_default dtype "
+                        f"{ty} does not match payload dtype {dtype}",
+                    )
+                controls.append((name, ArgumentBinding.runtime()))
+                continue
+            value = scalar.value
+            if name == "oob_default":
+                try:
+                    value = coerce_static_scalar(
+                        value,
+                        dtype,
+                        operation="load",
+                        parameter="oob_default",
+                        source_dtype=scalar.dtype,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise TypedPipelineError(str(exc)) from None
+            controls.append((name, ArgumentBinding.static(value)))
+        return tuple(controls)
+
+    def _store_scalar(self, site: _Site) -> _Scalar | None:
+        """Check a scalar ``store`` value as coop's planner does.
+
+        A static value converts to the destination's dtype under coop's
+        scalar rules; a runtime value must already have that dtype exactly.
+        """
+
+        from .._compiler._parameters import coerce_static_scalar
+
+        if site.kind != "store":
+            return None
+        var = site.stmt.value.args[2]
+        ty = self.typemap[var.name]
+        if not is_scalar_value(ty):
+            return None
+        dtype = site.request.dtype
+        scalar = self._provenance(var)
+        if scalar is _RUNTIME or scalar.value is None:
+            actual = getattr(ty, "literal_type", ty)
+            if actual != dtype:
+                raise TypedPipelineError(
+                    f"cuda.coop.numba_mlir.store value dtype {actual} does "
+                    f"not match destination dtype {dtype}"
+                )
+            return _Scalar(None)
+        try:
+            value = coerce_static_scalar(
+                scalar.value,
+                dtype,
+                operation="store",
+                parameter="value",
+                source_dtype=scalar.dtype,
+            )
+        except (TypeError, ValueError) as exc:
+            raise TypedPipelineError(str(exc)) from None
+        return _Scalar(value)
+
     # -- collect -----------------------------------------------------------
 
     def _collect(self) -> list[_Site]:
@@ -447,6 +665,8 @@ class CoopStoragePass(nb.Rewrite):
                 [self.typemap[a.name] for a in expr.args],
                 {k: self.typemap[v.name] for k, v in expr.kws},
             )
+            site.scalar = self._store_scalar(site)
+            site.request = with_controls(site.request, self._controls(site))
         unique = list(dict.fromkeys(s.request for s in sites))
         with (
             kernel_compile_target(target),
@@ -476,8 +696,22 @@ class CoopStoragePass(nb.Rewrite):
 
         for index, site in enumerate(sites):
             scratch = layouts[id(site)] is not None
-            method = _select_method(site.algorithm, 2 + int(scratch))
             request = site.request
+            runtime = sum(
+                b.kind.value == "runtime" for _, b in request.controls
+            )
+            method = _select_method(site.algorithm, 2 + scratch + runtime)
+            abi_arguments, operands = _operands(method, site, scratch)
+            value = ()
+            if site.scalar is not None:
+                value = (
+                    (
+                        "value",
+                        "runtime"
+                        if site.scalar.value is None
+                        else f"{site.scalar.value.item()!r}",
+                    ),
+                )
             plan.sites.append(
                 SitePlan(
                     index=index,
@@ -488,6 +722,11 @@ class CoopStoragePass(nb.Rewrite):
                         ("dtype", str(request.dtype)),
                         ("items_per_thread", request.items_per_thread),
                         ("block", "x".join(map(str, block))),
+                        *value,
+                        *(
+                            (name, _describe(binding))
+                            for name, binding in request.controls
+                        ),
                     ),
                     region=IMPLICIT_REGION if scratch else None,
                     barrier_after=barriers[index],
@@ -495,9 +734,8 @@ class CoopStoragePass(nb.Rewrite):
             )
             coop_plan.calls[site.stmt.target.name] = CallEntry(
                 symbol=site.algorithm.mangled_name(method) + "__abi",
-                abi_arguments=_abi_arguments(method),
-                pointer_arguments=(1, 2),
-                scratch=scratch,
+                abi_arguments=abi_arguments,
+                operands=operands,
                 barrier_after=barriers[index],
                 link_items=(bundle.link_item,),
             )
