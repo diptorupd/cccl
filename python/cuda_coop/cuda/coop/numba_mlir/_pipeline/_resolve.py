@@ -33,7 +33,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import _bridges as nb
-from . import _debug, _materialize, _sites, _specialize, _storage
+from . import _debug, _materialize, _settle, _sites, _specialize, _storage
 from ._materialize import CallEntry, CoopPlan
 from ._plan import KernelPlan, SitePlan
 
@@ -148,6 +148,7 @@ def resolve(state: Any, func_ir: Any, typemap: dict, calltypes: Any) -> None:
     """Resolve every cooperative call of the function ``state`` compiles."""
 
     targetoptions = state.metadata.get("targetoptions") or {}
+    _settle.settle(state, func_ir, typemap, calltypes)
     sites = _sites.analyze(
         func_ir,
         typemap,

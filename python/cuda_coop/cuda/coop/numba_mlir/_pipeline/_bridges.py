@@ -27,6 +27,8 @@ MLIR dialects, lowering utilities      public re-exports
 ``external_abi_function_type``         a public external-call builder
 ``cast_value``                         a public value-conversion helper for
                                        lowering
+``type_inference_stage``               a public way to retype a function from
+                                       an after-inference hook
 patch: argument-sized                  U-P-1: ``cuda.local.array`` requests a
 ``cuda.local.array``                   literal for a non-literal shape
 patch: tuple refinement                U-H1-4: refine hooks for
@@ -83,6 +85,7 @@ try:
         Rewrite,
         register_rewrite,
     )
+    from numba_cuda_mlir.numba_cuda.core.typed_passes import type_inference_stage
     from numba_cuda_mlir.numba_cuda.cudadrv import linkable_code
     from numba_cuda_mlir.numba_cuda.typeconv import Conversion
     from numba_cuda_mlir.numba_cuda.types import undefined, unliteral
@@ -230,6 +233,7 @@ __all__ = [
     "require_launch_config",
     "resolve_gpu_target",
     "signature",
+    "type_inference_stage",
     "types",
     "typing_registry",
     "undefined",
