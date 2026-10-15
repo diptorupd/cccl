@@ -49,7 +49,7 @@ except ImportError as exc:
         f"{NCM_VERSION}; the installed compiler is missing {exc.name or exc}."
     ) from exc
 
-from ._types import ThreadDataType
+from ._types import PRODUCER, ThreadDataType
 
 
 @dataclass(frozen=True)
@@ -324,7 +324,107 @@ JOIN_REFINEMENT = Patch(
     build=_join_refinement,
 )
 
-PATCHES = (LOCAL_ARRAY_SHAPE, TUPLE_REFINEMENT, JOIN_REFINEMENT)
+# Reads that wait for producer evidence (U-H1-9) ------------------------------
+
+_WITNESS_KEYS = frozenset(
+    {"coop.thread_data.refine_load", "coop.thread_data.refine_store"}
+)
+
+
+class _Deferred(typeinfer.TypingError):
+    """A consumer of a payload whose dtype a producer may still change."""
+
+
+def _unsettled(ty: Any) -> bool:
+    """Whether ``ty`` holds a payload typed by writes alone, so far."""
+
+    if isinstance(ty, ThreadDataType):
+        return ty.dtype.is_precise() and ty.strength < PRODUCER
+    return isinstance(ty, nb.types.BaseTuple) and any(
+        _unsettled(item) for item in ty.types
+    )
+
+
+def _producer_first() -> tuple[tuple[type, str, Any], ...]:
+    """Type a payload's consumers only after its producers, in two rounds.
+
+    A ``ThreadData`` without ``dtype=`` takes its dtype from the strongest
+    evidence: a ``load`` into it outranks an indexed write. Numba-CUDA-MLIR
+    types every constraint in each round, and a type variable only widens,
+    so a read typed while only a write was known keeps the write's dtype
+    after a later ``load`` refines the payload. With this patch, type
+    inference propagates in two rounds. In the first, a call (including an
+    indexed read, an iteration or a helper call) with an argument that is a
+    payload typed by writes alone waits, while the writes and the
+    cooperative operations type. The second round types the calls that
+    waited, against each payload's final dtype.
+
+    Scope: cooperative types only. A call waits only for an argument that
+    holds a ``ThreadDataType``; without one, the first round is the
+    compiler's own propagation and the second finds nothing to do.
+    """
+
+    from ._templates import OPERATIONS
+
+    propagate = typeinfer.TypeInferer.propagate
+    resolve = typeinfer.CallConstraint.resolve
+
+    def waits(fnty, typevars, constraint) -> bool:
+        key = getattr(fnty, "typing_key", None)
+        if key in OPERATIONS or key in _WITNESS_KEYS:
+            return False
+        names = [a.name for a in constraint.args]
+        names += [v.name for _, v in constraint.kws]
+        if constraint.vararg is not None:
+            names.append(constraint.vararg.name)
+        receiver = getattr(fnty, "this", None)
+        return _unsettled(receiver) or any(
+            typevars[n].defined and _unsettled(typevars[n].getone())
+            for n in names
+        )
+
+    def resolve_after_producers(self, typeinfer_, typevars, fnty):
+        if getattr(typeinfer_, "_coop_first_round", False) and waits(
+            fnty, typevars, self
+        ):
+            typeinfer_._coop_waited = True
+            raise _Deferred("waiting for the payload's producers")
+        return resolve(self, typeinfer_, typevars, fnty)
+
+    def propagate_in_two_rounds(self, raise_errors=True):
+        self._coop_first_round = True
+        self._coop_waited = False
+        try:
+            errors = propagate(self, raise_errors=False)
+        finally:
+            self._coop_first_round = False
+        if not self._coop_waited:
+            if errors and raise_errors:
+                return propagate(self, raise_errors=True)
+            return errors
+        return propagate(self, raise_errors=raise_errors)
+
+    return (
+        (typeinfer.TypeInferer, "propagate", propagate_in_two_rounds),
+        (typeinfer.CallConstraint, "resolve", resolve_after_producers),
+    )
+
+
+PRODUCER_FIRST = Patch(
+    name="producer-first typing",
+    ask=(
+        "U-H1-9 (a constraint can wait for a later round; a payload's "
+        "consumers type after its producers)"
+    ),
+    pins=(
+        Pin(typeinfer.TypeInferer, "propagate", "9d846381cc969eb8"),
+        Pin(typeinfer.CallConstraint, "resolve", "b41a0de1f79a9922"),
+        Pin(typeinfer.IntrinsicCallConstraint, "resolve", None),
+    ),
+    build=_producer_first,
+)
+
+PATCHES = (LOCAL_ARRAY_SHAPE, TUPLE_REFINEMENT, JOIN_REFINEMENT, PRODUCER_FIRST)
 
 _ABSENT = object()
 _replaced: list[tuple[type, str, Any]] = []
