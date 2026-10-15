@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""What the storage pass decides, read from its plan dump.
+"""What call resolution decides, read from its plan dump.
 
 Each test compiles one kernel for a stand-in launch of ``BLOCK`` threads and
 checks the plan with FileCheck: the sites in program order and the request

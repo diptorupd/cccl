@@ -27,12 +27,12 @@ The guarded method call is a witness: its template returns a refined
 receiver, which Numba propagates to the caller's payload with the evidence
 strength of a producer (or, for ``store``, of a store destination). The
 private operation then types with a precise payload and builds coop's own
-request, a dims-free ``GroupPrimitiveCall`` that the storage pass completes
+request, a dims-free ``GroupPrimitiveCall`` that call resolution completes
 with the launch's block.
 
 Each API has its own private operations, because their payload rules
 differ: a ``cuda.coop.numba_mlir`` call also accepts a ``cuda.local.array``
-payload, whose extent the storage pass reads from the IR, and a
+payload, whose extent call resolution reads from the IR, and a
 ``cuda.coop`` call refuses one with coop's common-API diagnostic.
 
 A ``ThreadData``'s ``items_per_thread`` attribute is its extent as an
@@ -350,7 +350,7 @@ class LoadStoreRequest:
     value have the same request, and two that differ in a static value do
     not. Requests are interned by ``key``, so identity is equality.
 
-    ``call`` is coop's ``GroupPrimitiveCall``; the storage pass completes
+    ``call`` is coop's ``GroupPrimitiveCall``; call resolution completes
     it with ``plan_group_primitive`` once it knows the block.
     """
 
@@ -514,14 +514,14 @@ def _request(
     """Validate a typed call and return its interned request.
 
     The request has no controls: whether a control is static or runtime
-    depends on where its value comes from, which the storage pass reads
+    depends on where its value comes from, which site analysis reads
     from the IR. A scalar ``store`` value stores one item per thread of the
-    destination's dtype; the storage pass checks the value against it.
+    destination's dtype; site analysis checks the value against it.
 
     Return ``None`` while the payload's dtype is still undefined, so that a
     later typing round retries with the refined payload. A qualified call
     with a plain-array payload has no extent in its types; it returns
-    ``_PENDING_EXTENT`` until the storage pass supplies ``extent``.
+    ``_PENDING_EXTENT`` until site analysis supplies ``extent``.
     """
 
     from ..._core.dtype_policy import validate_common_numeric_dtype_name
@@ -580,7 +580,7 @@ def request_for(
 
     request = _request(kind, args, kws, qualified=qualified, extent=extent)
     if request is None or request is _PENDING_EXTENT:
-        raise AssertionError(f"coop.{kind} reached the storage pass untyped")
+        raise AssertionError(f"coop.{kind} reached call resolution untyped")
     return request
 
 

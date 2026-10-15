@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""What inference and the storage pass leave in the typed Numba IR.
+"""What inference and call resolution leave in the typed Numba IR.
 
 The dump is taken after the last rewrite, so it shows the ``ThreadData``
 types with their evidence and the ``cuda.shared.array`` backing the storage

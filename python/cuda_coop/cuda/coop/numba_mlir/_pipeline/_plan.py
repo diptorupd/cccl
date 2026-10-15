@@ -2,12 +2,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Describe what the storage pass decided for one kernel.
+"""Describe what call resolution decided for one kernel.
 
 A ``KernelPlan`` is plain data: the cooperative call sites in program order,
 the request each one completed to, the scratch regions and their backing,
-the barriers, and the launch facts the pass read. It does not refer to
-Numba IR, so it is the part of the pass a second host compiler could share.
+the barriers, and the launch facts the resolution read. It does not refer to
+Numba IR, so it is the part of the resolution a second host compiler could
+share.
 
 ``format_plan`` renders a plan as stable text. Tests check that text with
 FileCheck, and ``CUDA_COOP_NUMBA_MLIR_PIPELINE_PRINT=plan`` prints it for
@@ -59,7 +60,7 @@ class SitePlan:
 
 @dataclass
 class KernelPlan:
-    """Everything the storage pass decided for one kernel.
+    """Everything call resolution decided for one kernel.
 
     ``bundle`` is the number of distinct provider specializations compiled
     together, in one translation unit, for all of the kernel's sites.

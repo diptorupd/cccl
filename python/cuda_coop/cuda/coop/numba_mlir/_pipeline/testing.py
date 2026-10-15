@@ -6,8 +6,8 @@
 
 A test compiles one small kernel and checks one textual dump of it:
 
-* ``plan`` -- the storage pass's decisions (``format_plan``);
-* ``typed_ir`` -- the Numba IR with types, after the storage pass;
+* ``plan`` -- call resolution's decisions (``format_plan``);
+* ``typed_ir`` -- the Numba IR with types, after call resolution;
 * ``mlir`` -- the MLIR module after lowering.
 
 Checks use FileCheck syntax (``CHECK``, ``CHECK-NEXT``, ``CHECK-NOT``,
