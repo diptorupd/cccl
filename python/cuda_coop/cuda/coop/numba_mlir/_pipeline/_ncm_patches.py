@@ -41,7 +41,8 @@ from . import _bridges as nb
 NCM_VERSION = "0.5.4"
 
 try:
-    from numba_cuda_mlir.numba_cuda.core import typeinfer
+    from numba_cuda_mlir import mlir_compiler
+    from numba_cuda_mlir.numba_cuda.core import typed_passes, typeinfer
     from numba_cuda_mlir.typing import cuda as cuda_typing
 except ImportError as exc:
     raise nb.TypedPipelineUnavailableError(
@@ -99,7 +100,9 @@ def check(patch: Patch) -> None:
         stale = [p for p in patch.pins if not _pinned(p)]
         if not stale:
             return
-        changed = f"{stale[0].owner.__qualname__}.{stale[0].name} has changed"
+        owner = stale[0].owner
+        owner_name = getattr(owner, "__qualname__", owner.__name__)
+        changed = f"{owner_name}.{stale[0].name} has changed"
     raise nb.TypedPipelineUnavailableError(
         f"The cuda.coop typed pipeline's {patch.name!r} patch was written "
         f"against Numba-CUDA-MLIR {NCM_VERSION}, but {changed}. The patch is "
@@ -324,7 +327,115 @@ JOIN_REFINEMENT = Patch(
     build=_join_refinement,
 )
 
-PATCHES = (LOCAL_ARRAY_SHAPE, TUPLE_REFINEMENT, JOIN_REFINEMENT)
+# Payload types decided around type inference (outer pass) -------------------
+
+OUTER_PASS_ROUNDS = 3
+
+
+def _outer_pass() -> tuple[tuple[type, str, Any], ...]:
+    """Type a function again with its payloads' final types as locals.
+
+    Numba types each use of a ``ThreadData`` against the evidence known when
+    the use is typed, so a read before a ``load`` keeps the write's dtype.
+    With this patch the typing pass runs Numba's type inference as before.
+    When the result holds a payload use typed against another dtype than
+    the payload's final one (``_outer_pass.seeds``), it runs it again with
+    those payloads locked at their final types through ``locals``, up to
+    ``OUTER_PASS_ROUNDS`` times, until no new payload needs a lock. When
+    typing raises in a function that refers to a cooperative object, a
+    partial typing (``raise_errors=False``) supplies the decision instead.
+    The last typing is the stock pass with its own ``raise_errors``: its
+    result, or its error, is what the pipeline sees. ``ForceLiteralArg``
+    passes through at once.
+
+    Scope: cooperative types only. A function whose typing holds no
+    ``ThreadDataType`` and that refers to no cooperative object is typed
+    once, by the stock pass.
+    """
+
+    from . import _outer_pass
+
+    run_pass = mlir_compiler.MLIRTypeInference.run_pass
+
+    def partial(state, locals_):
+        try:
+            return mlir_compiler.type_inference_stage(
+                state.typingctx,
+                state.targetctx,
+                state.func_ir,
+                state.args,
+                state.return_type,
+                locals_,
+                raise_errors=False,
+            )
+        except Exception:  # noqa: BLE001 - the stock typing's error stands.
+            return None
+
+    def typed(self, state, locals_):
+        saved = state.locals
+        state.locals = locals_
+        try:
+            return run_pass(self, state), None
+        except nb.errors.ForceLiteralArg:
+            raise
+        except Exception as exc:  # noqa: BLE001 - re-raised unless retyped.
+            return None, exc
+        finally:
+            state.locals = saved
+
+    def outer_run_pass(self, state):
+        if not self._raise_errors:
+            return run_pass(self, state)
+        base = dict(state.locals or {})
+        seeded: dict = {}
+        for round_ in range(OUTER_PASS_ROUNDS + 1):
+            locals_ = {**seeded, **base} if seeded else state.locals
+            result, failure = typed(self, state, locals_)
+            if failure is None:
+                typemap, calltypes = state.typemap, state.calltypes
+            elif _outer_pass.mentions_coop(state.func_ir, state.args):
+                probe = partial(state, locals_)
+                if probe is None:
+                    raise failure
+                typemap, calltypes = probe.typemap, probe.calltypes
+            else:
+                raise failure
+            if not _outer_pass.holds_thread_data(typemap):
+                break
+            chosen = _outer_pass.seeds(
+                state.func_ir, typemap, calltypes, failure is not None
+            )
+            merged = {**chosen, **seeded}
+            if merged == seeded or round_ == OUTER_PASS_ROUNDS:
+                break
+            seeded = merged
+        if failure is not None:
+            raise failure
+        return result
+
+    return ((mlir_compiler.MLIRTypeInference, "run_pass", outer_run_pass),)
+
+
+OUTER_PASS = Patch(
+    name="outer typing pass",
+    ask=(
+        "a typing hook that may type a function again with seeded local "
+        "types (no upstream ask yet; T12 spike)"
+    ),
+    pins=(
+        Pin(mlir_compiler.MLIRTypeInference, "run_pass", "c6947603d8ab32a3"),
+        Pin(mlir_compiler, "type_inference_stage", "e61d626f478d6c3b"),
+        Pin(typed_passes, "type_inference_stage", "e61d626f478d6c3b"),
+        Pin(typeinfer.TypeInferer, "seed_type", "55e93650b1573c33"),
+        Pin(typeinfer.TypeInferer, "lock_type", "7b2e594f4fed6547"),
+        Pin(typeinfer.TypeVar, "lock", "6f48b691d17a1807"),
+        Pin(typeinfer.TypeVar, "add_type", "e096680b79ecf149"),
+        Pin(typeinfer.TypeInferer, "propagate", "9d846381cc969eb8"),
+    ),
+    build=_outer_pass,
+)
+
+PATCHES = (LOCAL_ARRAY_SHAPE, TUPLE_REFINEMENT, JOIN_REFINEMENT, OUTER_PASS)
 
 _ABSENT = object()
 _replaced: list[tuple[type, str, Any]] = []
@@ -353,6 +464,8 @@ __all__ = [
     "JOIN_REFINEMENT",
     "LOCAL_ARRAY_SHAPE",
     "NCM_VERSION",
+    "OUTER_PASS",
+    "OUTER_PASS_ROUNDS",
     "PATCHES",
     "TUPLE_REFINEMENT",
     "Patch",

@@ -34,6 +34,8 @@ patch: tuple refinement                U-H1-4: refine hooks for
 patch: phi refinement                  U-H1-3: refine every phi input; a
                                        constructor's refine hook does not
                                        raise
+patch: outer typing pass               a typing hook that may type a function
+                                       again with seeded local types
 =====================================  =======================================
 
 Importing this module fails with ``TypedPipelineUnavailableError`` when any
