@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 
 import numpy as np
@@ -13,14 +14,29 @@ import pytest
 from numba_cuda_mlir import cuda, types
 
 from cuda import coop
-from cuda.coop.numba_mlir._pipeline import testing
+from cuda.coop.numba_mlir._pipeline import _payload_rules, testing
 from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
+from cuda.coop.numba_mlir._pipeline._typing_rules import RULES, Event
 
 from ._support import BLOCK, CHIP, f32_in_out, requires_typed_pipeline
 
 
 def _compile(kernel):
     return testing.compile_kernel(kernel, f32_in_out(), block=BLOCK, chip=CHIP)
+
+
+def _line(fn, text):
+    lines, start = inspect.getsourcelines(fn)
+    return start + next(i for i, line in enumerate(lines) if text in line)
+
+
+@requires_typed_pipeline
+def test_the_registered_rules_are_coops_typing_spec():
+    assert [row[:3] for row in RULES.describe()] == [
+        ("gate", "ThreadDataType", "read_after_producers"),
+        ("check", "ThreadDataType", "released_reads_agree"),
+        ("check", "ThreadDataType", "writes_agree"),
+    ]
 
 
 def test_a_key_matches_instances_tuples_and_receivers():
@@ -73,6 +89,59 @@ def test_a_read_before_the_load_waits_for_it():
     output = np.zeros(1, np.float32)
     cuda.jit(_review)[1, 32](source, output)
     assert output[0] == 2.25
+
+
+@requires_typed_pipeline
+def test_the_trace_shows_the_read_wait_for_the_load():
+    line = _line(_review, "observed = payload[0]")
+    with RULES.tracing() as events:
+        _compile(_review)
+    assert [e for e in events if e.kind == "gate"] == [
+        Event("gate", "read_after_producers", line, "wait"),
+        Event("gate", "read_after_producers", line, "open"),
+    ]
+
+
+@requires_typed_pipeline
+def test_without_the_gate_the_read_keeps_the_write_dtype():
+    with (
+        RULES.without(_payload_rules.read_after_producers),
+        pytest.raises(
+            TypedPipelineError, match=r"typed as float64, but the payload's"
+        ),
+    ):
+        _compile(_review)
+
+
+def _mixed_writes(source, output):
+    payload = coop.ThreadData(2)
+    payload[0] = np.int32(2)
+    payload[1] = np.float64(1.25)
+    if cuda.threadIdx.x == 0:
+        output[0] = payload[0] + payload[1]
+
+
+@requires_typed_pipeline
+def test_writes_that_disagree_are_refused_in_typing():
+    with (
+        RULES.tracing() as events,
+        pytest.raises(
+            TypedPipelineError,
+            match=r"'payload': its writes disagree on the dtype "
+            r"\(float64, int32\)",
+        ),
+    ):
+        _compile(_mixed_writes)
+    line = _line(_mixed_writes, "np.int32(2)")
+    assert Event("check", "writes_agree", line, "conflict") in events
+
+
+@requires_typed_pipeline
+def test_without_the_check_disagreeing_writes_convert_silently():
+    output = np.zeros(1, np.float32)
+    with RULES.without(_payload_rules.writes_agree):
+        cuda.jit(_mixed_writes)[1, 32](np.zeros(32, np.float32), output)
+    assert output[0] == 3.0
 
 
 @cuda.jit(device=True, inline="never")

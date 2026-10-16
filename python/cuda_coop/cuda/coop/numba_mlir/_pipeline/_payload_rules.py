@@ -17,6 +17,9 @@ typing instead:
 * check: a call released that way must still agree with its payload at the
   last fixed point; a producer that arrived only after the release (its
   source depended on the read) is a stale read, and an error.
+* check: a payload whose dtype comes from indexed writes alone takes it from
+  the first write typed, and converts the others silently; so all of its
+  writes must have that dtype.
 
 Indexed writes are ``setitem`` constraints, not calls, so they never wait.
 """
@@ -29,7 +32,7 @@ from typing import Any
 from . import _bridges as nb
 from . import _typing_rules as rules
 from ._errors import TypedPipelineError
-from ._types import PRODUCER, ThreadDataType
+from ._types import PRODUCER, WRITE, ThreadDataType
 
 _WITNESS_KEYS = frozenset(
     {"coop.thread_data.refine_load", "coop.thread_data.refine_store"}
@@ -97,6 +100,30 @@ def released_reads_agree(typeinfer_, matching, released):
     return errors
 
 
+def writes_agree(typeinfer_, matching, released):
+    """Check: a payload typed by indexed writes alone has one dtype."""
+
+    written: dict[str, dict] = {}
+    for name, value, loc in rules.writes(typeinfer_):
+        payload = matching.get(name)
+        if payload is None or payload.strength != WRITE or value is None:
+            continue
+        written.setdefault(name, {}).setdefault(nb.unliteral(value), loc)
+    errors = []
+    for name, dtypes in written.items():
+        if set(dtypes) == {matching[name].dtype}:
+            continue
+        found = ", ".join(sorted(map(str, dtypes)))
+        errors.append(
+            TypedPipelineError(
+                f"coop.ThreadData {name!r}: its writes disagree on the dtype "
+                f"({found}). Pass dtype= or make the writes agree.",
+                loc=next(iter(dtypes.values())),
+            )
+        )
+    return errors
+
+
 _registered = False
 
 
@@ -108,7 +135,13 @@ def register() -> None:
         return
     rules.register(ThreadDataType, rules.GATE, read_after_producers)
     rules.register(ThreadDataType, rules.CHECK, released_reads_agree)
+    rules.register(ThreadDataType, rules.CHECK, writes_agree)
     _registered = True
 
 
-__all__ = ["read_after_producers", "register", "released_reads_agree"]
+__all__ = [
+    "read_after_producers",
+    "register",
+    "released_reads_agree",
+    "writes_agree",
+]
