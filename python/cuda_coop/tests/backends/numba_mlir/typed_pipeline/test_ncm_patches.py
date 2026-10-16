@@ -17,10 +17,12 @@ import pytest
 from ._support import TYPED, requires_typed_pipeline, run_python
 
 _TARGETS = """
+from numba_cuda_mlir import mlir_compiler
 from numba_cuda_mlir.typing import cuda as cuda_typing
 from numba_cuda_mlir.numba_cuda.core import typeinfer
 
 owners = (
+    mlir_compiler.MLIRTypeInference,
     cuda_typing.GenericArrayTemplate,
     cuda_typing.LocalArrayTemplate,
     typeinfer.Propagate,
@@ -51,6 +53,7 @@ PATCHED = [
     "BuildTupleConstraint.refine",
     "CallConstraint.refine",
     "LocalArrayTemplate.generic",
+    "MLIRTypeInference.run_pass",
     "Propagate.__call__",
     "StaticGetItemConstraint.__call__",
     "StaticGetItemConstraint.refine",
