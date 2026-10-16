@@ -28,9 +28,13 @@ owners = (
     descriptor._ArgMarshaller,
     cuda_typing.GenericArrayTemplate,
     cuda_typing.LocalArrayTemplate,
+    typeinfer.TypeInferer,
+    typeinfer.ConstraintNetwork,
     typeinfer.Propagate,
     typeinfer.CallConstraint,
+    typeinfer.SetItemConstraint,
     typeinfer.StaticGetItemConstraint,
+    typeinfer.StaticSetItemConstraint,
     typeinfer.BuildTupleConstraint,
 )
 before = [dict(vars(owner)) for owner in owners]
@@ -55,12 +59,21 @@ PATCHED = [
     "BuildTupleConstraint.__call__",
     "BuildTupleConstraint.refine",
     "CallConstraint.refine",
+    "CallConstraint.resolve",
+    "ConstraintNetwork.propagate",
     "LocalArrayTemplate.generic",
     "Propagate.__call__",
+    "SetItemConstraint.__call__",
     "StaticGetItemConstraint.__call__",
     "StaticGetItemConstraint.refine",
+    "StaticSetItemConstraint.__call__",
+    "TypeInferer.add_type",
+    "TypeInferer.copy_type",
+    "TypeInferer.propagate",
+    "TypeInferer.resolve_call",
+    "TypeInferer.resolve_value_type",
+    "TypeInferer.typeof_assign",
     "_ArgMarshaller._launch",
-    "typeinfer.TypeInferer",
 ]
 
 
@@ -137,6 +150,66 @@ def test_apply_is_idempotent():
         sorted(f"{o.__name__.rsplit('.', 1)[-1]}.{n}" for o, n in replaced)
         == PATCHED
     )
+
+
+@requires_typed_pipeline
+def test_type_inference_keeps_the_compilers_own_inferer():
+    from numba_cuda_mlir.numba_cuda.core import typed_passes, typeinfer
+
+    inferer = typeinfer.TypeInferer
+    assert inferer.__module__ == typeinfer.__name__
+    assert inferer.__bases__ == (object,)
+    assert typed_passes.typeinfer.TypeInferer is inferer
+
+
+def test_the_typing_rule_engine_knows_no_cooperative_types():
+    import inspect
+
+    from cuda.coop.numba_mlir._pipeline import _typing_rules
+
+    source = inspect.getsource(_typing_rules).lower()
+    assert "coop" not in source
+    assert "threaddata" not in source
+
+
+# Typing rules (U-R1 to U-R4) ------------------------------------------------
+
+
+@requires_typed_pipeline
+def test_plain_kernels_compile_as_without_typing_rules(monkeypatch):
+    from numba_cuda_mlir import compiler, cuda, types
+
+    from cuda.coop.numba_mlir._pipeline import _typing_rules
+
+    def saxpy(a, x, y, out):
+        i = cuda.grid(1)
+        if i < out.size:
+            out[i] = a * x[i] + y[i]
+
+    def local_sum(source, output):
+        values = cuda.local.array(4, types.float32)
+        for i in range(4):
+            values[i] = source[i] * 2
+        total = 0.0
+        for i in range(4):
+            total += values[i]
+        output[cuda.threadIdx.x] = total
+
+    array = types.float32[::1]
+    kernels = (
+        (saxpy, (types.float32, array, array, array)),
+        (local_sum, (array, array)),
+    )
+
+    def mlir():
+        return [
+            str(compiler.compile_mlir(cuda.jit(kernel), signature))
+            for kernel, signature in kernels
+        ]
+
+    with_rules = mlir()
+    monkeypatch.setattr(_typing_rules, "RULES", _typing_rules.RuleSet())
+    assert mlir() == with_rules
 
 
 @pytest.mark.skipif(TYPED, reason="checks the pins without applying them")
