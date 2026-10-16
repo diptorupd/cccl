@@ -24,6 +24,9 @@ types in two ways, described by each patch:
 * cooperative types only: it acts only on values whose type is, or is a
   tuple holding, a ``ThreadDataType``.
 
+Typing rules wrap the compiler's own methods, which run unchanged unless a
+registered rule's key matches; ``_inference`` registers coop's rules.
+
 Launch preparation also runs for ordinary kernels in typed mode. It retains
 generic specialization and cache eligibility but adds a ready-overload lookup
 so requirements discovered during a cooperative compile reach the first launch.
@@ -51,6 +54,8 @@ try:
     from numba_cuda_mlir import descriptor
     from numba_cuda_mlir.numba_cuda.core import typeinfer
     from numba_cuda_mlir.typing import cuda as cuda_typing
+
+    from . import _typing_rules
 except ImportError as exc:
     raise nb.TypedPipelineUnavailableError(
         "The cuda.coop typed pipeline patches Numba-CUDA-MLIR "
@@ -335,19 +340,33 @@ JOIN_REFINEMENT = Patch(
 )
 
 
-def _cooperative_inference() -> tuple[tuple[Any, str, Any], ...]:
-    """Construct the native solver with cooperative mutation constraints."""
+# Typing rules (U-R1 to U-R4) ------------------------------------------------
 
-    from ._inference import CooperativeTypeInferer
+_TypeInferer = typeinfer.TypeInferer
 
-    return ((typeinfer, "TypeInferer", CooperativeTypeInferer),)
-
-
-COOPERATIVE_INFERENCE = Patch(
-    name="cooperative inference constraints",
-    ask="a supported native TypeInferer factory and mutation-constraint hook",
-    pins=(Pin(typeinfer, "TypeInferer", "d61c50b7d4f6f009"),),
-    build=_cooperative_inference,
+TYPING_RULES = Patch(
+    name="typing rules",
+    ask=(
+        "U-R1 to U-R4 (an extension registers typing rules that type "
+        "inference runs at its own points)"
+    ),
+    pins=(
+        Pin(typeinfer, "TypeInferer", "d61c50b7d4f6f009"),
+        Pin(_TypeInferer, "propagate", "9d846381cc969eb8"),
+        Pin(_TypeInferer, "get_state_token", "ed391a44719f2abc"),
+        Pin(_TypeInferer, "add_type", "d96e14e2ffa2ad64"),
+        Pin(_TypeInferer, "copy_type", "c4b18f0b990813c9"),
+        Pin(_TypeInferer, "resolve_call", "8da5a0824097d9e9"),
+        Pin(_TypeInferer, "resolve_value_type", "f4f1f78350945a3f"),
+        Pin(_TypeInferer, "typeof_assign", "9a84d710855411c0"),
+        Pin(typeinfer.ConstraintNetwork, "propagate", "1e606cddef0a1677"),
+        Pin(typeinfer.CallConstraint, "resolve", "b41a0de1f79a9922"),
+        Pin(typeinfer.IntrinsicCallConstraint, "resolve", None),
+        Pin(typeinfer.SetItemConstraint, "__call__", "31a26e219c12159f"),
+        Pin(typeinfer.StaticSetItemConstraint, "__call__", "88cc8e590fb96aba"),
+        Pin(typeinfer, "fold_arg_vars", "581289ed10e3c724"),
+    ),
+    build=_typing_rules.points,
 )
 
 
@@ -412,7 +431,7 @@ PATCHES = (
     LOCAL_ARRAY_SHAPE,
     TUPLE_REFINEMENT,
     JOIN_REFINEMENT,
-    COOPERATIVE_INFERENCE,
+    TYPING_RULES,
     LAUNCH_PREPARATION,
 )
 
@@ -440,13 +459,13 @@ def replaced() -> tuple[tuple[Any, str], ...]:
 
 
 __all__ = [
-    "COOPERATIVE_INFERENCE",
     "JOIN_REFINEMENT",
     "LAUNCH_PREPARATION",
     "LOCAL_ARRAY_SHAPE",
     "NCM_VERSION",
     "PATCHES",
     "TUPLE_REFINEMENT",
+    "TYPING_RULES",
     "Patch",
     "Pin",
     "apply",

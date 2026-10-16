@@ -48,6 +48,7 @@ def _activate() -> None:
         _exchange,
         _groups,
         _histogram,
+        _inference,
         _lower,
         _merge_sort,
         _ncm_patches,
@@ -79,6 +80,7 @@ def _activate() -> None:
     _merge_sort.register()
     _radix.register()
     _topk.register()
+    _inference.register()
     _lower.register()
     _resolve.register()
     _bridges.refresh_registries()

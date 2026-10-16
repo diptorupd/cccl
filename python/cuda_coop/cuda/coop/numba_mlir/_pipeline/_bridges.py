@@ -35,9 +35,9 @@ patch: tuple refinement                U-H1-4: refine hooks for
 patch: phi refinement                  U-H1-3: refine every phi input; a
                                        constructor's refine hook does not
                                        raise
-patch: native inference constraints    public constructor-origin and mutation
-                                       constraints with helper specialization
-                                       that preserves payload dtype and extent
+patch: typing rules                    U-R1 to U-R4: typing rules an
+                                       extension registers, which type
+                                       inference runs at its own points
 patch: first-launch preparation        public compiler-extension preparation
                                        before selecting dynamic launch bytes
 =====================================  =======================================

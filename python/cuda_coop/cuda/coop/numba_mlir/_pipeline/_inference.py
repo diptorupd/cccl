@@ -2,12 +2,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Cooperative mutation contracts within Numba's native inference network.
+"""Cooperative mutation contracts as typing rules on Numba's own inference.
 
 Native constraints own ordinary expressions, calls and control-flow joins.
 Allocation origins retain the distinction between inferred writes and typed
-producers. Producer constraints establish those dtypes before indexed writes
+producers. Producer rules establish those dtypes before indexed writes
 or their consumers are typed; Store only supplies a dtype when writes do not.
+
+``register`` adds these rules to ``_typing_rules``; the compiler's type
+inferer, constraints and propagation loop stay its own.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from . import _bridges as nb
+from . import _typing_rules as rules
 from ._types import EXPLICIT, PRODUCER, STORE_DST, WRITE, ThreadDataType
 
 
@@ -110,23 +114,6 @@ def _native_type(value: Any) -> Any:
             tuple(_native_type(item) for item in cast(Iterable[Any], value))
         )
     return value
-
-
-class _PayloadSetItem:
-    """Let producers or checked writes establish the dtype before casting."""
-
-    def __init__(self, native: Any) -> None:
-        self.native = native
-        self.loc = native.loc
-
-    def __call__(self, infer: Any) -> None:
-        payload = infer.variable_type(self.native.target)
-        if isinstance(payload, ThreadDataType) and not payload.is_precise():
-            return
-        self.native(infer)
-
-    def get_call_signature(self) -> Any:
-        return self.native.get_call_signature()
 
 
 class _PayloadWrite:
@@ -233,136 +220,119 @@ class _PayloadMutation:
         )
 
 
-class _CooperativeCall(nb.typeinfer.CallConstraint):
-    def resolve(self, typeinfer, typevars, fnty):
-        if isinstance(fnty, nb.types.Dispatcher):
-            arguments = nb.typeinfer.fold_arg_vars(
-                typevars, self.args, self.vararg, self.kws
+def _mutations(call: Any, contract: OperationInference) -> list:
+    """The producer and Store mutations a contract makes of one call."""
+
+    mutations = []
+    for pairs, strength, checked in (
+        (contract.producers, PRODUCER, False),
+        (contract.checked_producers, PRODUCER, True),
+        (contract.stores, STORE_DST, False),
+    ):
+        for output, source in pairs:
+            resolver = None
+            if isinstance(source, DtypeSource):
+                resolver = source.resolve
+                source = source.operand
+            target = _argument(call, output)
+            value = _argument(call, source)
+            if target is None or value is None:
+                continue
+            mutations.append(
+                _PayloadMutation(
+                    target, value, strength, call.loc, resolver, checked
+                )
             )
-            if arguments is not None:
-                args, kws = arguments
-                if any(
-                    _contains_imprecise_payload(arg)
-                    for arg in (*args, *kws.values())
-                ):
-                    return
-        previous = typeinfer.active_call
-        typeinfer.active_call = self
-        try:
-            super().resolve(typeinfer, typevars, fnty)
-        finally:
-            typeinfer.active_call = previous
-        if (
-            self.target in typeinfer.payload_constructors
-            or self.target in typeinfer.origin_factories
-        ) and self.signature:
-            self.signature = self.signature.replace(
-                return_type=typevars[self.target].getone()
-            )
+    return mutations
 
 
-class CooperativeTypeInferer(nb.typeinfer.TypeInferer):
-    """Extend native constraints without re-inferring ordinary expressions."""
+def _typing_key(ty: Any) -> Any:
+    key = getattr(ty, "typing_key", None)
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
 
-    def __init__(self, context, func_ir, warnings):
-        super().__init__(context, func_ir, warnings)
-        from ._templates import kernel_primitives
 
-        constructors = {
-            function
-            for function, name in kernel_primitives().items()
-            if name.rsplit(".", 1)[-1] == "ThreadData"
-        }
-        self.payload_constructors: set[str] = set()
-        self.origin_factories: dict[str, Callable] = {}
+_payload_constructors: set = set()
+
+
+class _Inference:
+    """One type inference's allocation origins, contracts and strata.
+
+    Constructor targets and contract calls are found from the callee types
+    of the inference's own call constraints. Static callback arguments are
+    found by constant inference on the IR, as their values have no type.
+    """
+
+    def __init__(self, typeinfer: Any) -> None:
+        self.typeinfer = typeinfer
+        self.func_ir = typeinfer.func_ir
         self.origin_scope = object()
         self.payload_origins: dict[tuple, ThreadDataType] = {}
         self.refining_origins: set[tuple] = set()
-        self.payload_mutations: list[_PayloadMutation] = []
-        self.payload_writes: list[_PayloadWrite] = []
-        self.static_values: dict[int, Any] = {}
-        self.static_arguments: dict[str, Any] = {}
+        self.unstamped: Any = None
         self.allow_fallback = False
         self.allow_dependent_writes = False
-        self.active_call = None
-        for block in func_ir.blocks.values():
-            for statement in block.find_insts(nb.ir.Assign):
-                call = statement.value
-                if not isinstance(call, nb.ir.Expr) or call.op != "call":
-                    continue
-                try:
-                    function = func_ir.infer_constant(call.func)
-                except nb.errors.ConstantInferenceError:
-                    continue
-                if function in constructors:
-                    self.payload_constructors.add(statement.target.name)
-                factory = constructor_origin_factories.get(function)
-                if factory is not None:
-                    self.origin_factories[statement.target.name] = factory
-                for operand, factory in operation_static_arguments.get(
-                    function, {}
-                ).items():
-                    variable = _argument(call, operand)
-                    if variable is None:
-                        continue
-                    try:
-                        value = func_ir.infer_constant(variable)
-                    except nb.errors.ConstantInferenceError:
-                        continue
-                    try:
-                        context.resolve_value_type(value)
-                    except ValueError:
-                        static_type = factory(value)
-                        self.static_values[id(value)] = static_type
-                        self.static_arguments[variable.name] = static_type
-                contract = operation_inference_contracts.get(function)
-                if contract is None:
-                    continue
-                for pairs, strength, checked in (
-                    (contract.producers, PRODUCER, False),
-                    (contract.checked_producers, PRODUCER, True),
-                    (contract.stores, STORE_DST, False),
-                ):
-                    for output, source in pairs:
-                        resolver = None
-                        if isinstance(source, DtypeSource):
-                            resolver = source.resolve
-                            source = source.operand
-                        target = _argument(call, output)
-                        value = _argument(call, source)
-                        if target is None or value is None:
-                            continue
-                        self.payload_mutations.append(
-                            _PayloadMutation(
-                                target,
-                                value,
-                                strength,
-                                statement.loc,
-                                resolver,
-                                checked,
-                            )
-                        )
-
-    def resolve_value_type(self, inst, val):
-        static_type = self.static_values.get(id(val))
-        if static_type is not None:
-            return static_type
-        return super().resolve_value_type(inst, val)
-
-    def typeof_assign(self, inst):
-        static_type = self.static_arguments.get(inst.target.name)
-        if static_type is not None:
-            self.add_type(inst.target.name, static_type, inst.loc)
-            return
-        super().typeof_assign(inst)
+        self._static: tuple[dict, dict] | None = None
+        self._targets: dict[str, Any] = {}
+        self._indexed = 0
+        self._mutations: dict[Any, list] = {}
+        self._writes: dict[Any, _PayloadWrite] = {}
 
     def variable_type(self, variable):
-        value = self.typevars[variable.name]
+        value = self.typeinfer.typevars[variable.name]
         return value.getone() if value.defined else None
+
+    def add_type(self, var, tp, loc):
+        self.typeinfer.add_type(var, tp, loc)
+
+    def _call_constraints(self):
+        for _, constraint in self.typeinfer.calls:
+            if type(constraint) is nb.typeinfer.CallConstraint:
+                yield constraint
+
+    def constructor(self, var: str) -> Any:
+        """The typing key of the call that assigns ``var``, if typed."""
+
+        calls = self.typeinfer.calls
+        if self._indexed != len(calls):
+            self._targets = {c.target: c for c in self._call_constraints()}
+            self._indexed = len(calls)
+        call = self._targets.get(var)
+        if call is None:
+            return None
+        return _typing_key(self.typeinfer.typevars[call.func].type)
+
+    def mutations_of(self, call: Any) -> list:
+        found = self._mutations.get(call)
+        if found is None:
+            callee = self.typeinfer.typevars[call.func].type
+            contract = operation_inference_contracts.get(_typing_key(callee))
+            if contract is None:
+                return []
+            found = self._mutations[call] = _mutations(call, contract)
+        return found
+
+    def payload_mutations(self):
+        for call in self._call_constraints():
+            yield from self.mutations_of(call)
+
+    def write_of(self, constraint: Any) -> _PayloadWrite:
+        write = self._writes.get(constraint)
+        if write is None:
+            write = self._writes[constraint] = _PayloadWrite(constraint)
+        return write
+
+    def payload_writes(self):
+        for statement, constraint in self.typeinfer.calls:
+            if isinstance(statement, (nb.ir.SetItem, nb.ir.StaticSetItem)):
+                yield self.write_of(constraint)
 
     def producer_origins(self):
         origins = set()
-        for mutation in self.payload_mutations:
+        for mutation in self.payload_mutations():
             if mutation.strength != PRODUCER or mutation.checked:
                 continue
             payload = self.variable_type(mutation.payload)
@@ -407,31 +377,9 @@ class CooperativeTypeInferer(nb.typeinfer.TypeInferer):
                     pending.extend(definition.list_vars())
         return origins
 
-    def propagate(self, raise_errors=True):
-        """Exhaust independent evidence before supplying fallback context."""
-
-        errors = super().propagate(raise_errors=False)
-        pending = any(
-            mutation.strength == STORE_DST
-            and isinstance(
-                payload := self.variable_type(mutation.payload), ThreadDataType
-            )
-            and not payload.is_precise()
-            for mutation in self.payload_mutations
-        )
-        if pending:
-            self.allow_fallback = True
-            errors = super().propagate(raise_errors=False)
-        if (not self.payload_origins or not self.payload_writes) and (
-            not errors or not raise_errors
-        ):
-            return errors
-        self.allow_dependent_writes = True
-        return super().propagate(raise_errors=raise_errors)
-
     def write_origins(self):
         origins = set()
-        for write in self.payload_writes:
+        for write in self.payload_writes():
             payload = self.variable_type(write.target)
             if payload is None:
                 return None
@@ -439,109 +387,248 @@ class CooperativeTypeInferer(nb.typeinfer.TypeInferer):
                 origins.update(payload.origins)
         return origins
 
-    def add_type(self, var, tp, loc, unless_locked=False):
-        factory = self.origin_factories.get(var)
-        if factory is not None:
-            tp = factory(tp, (self.origin_scope, var))
-        if isinstance(tp, ThreadDataType):
-            if var in self.payload_constructors:
-                origin = (self.origin_scope, var)
-                origins = frozenset({origin})
-                inferred = (
-                    frozenset()
-                    if tp.is_precise() and tp.strength == EXPLICIT
-                    else origins
-                )
-                tp = tp.with_origins(origins, inferred)
-                self.payload_origins.setdefault(origin, tp)
-            if tp.is_precise():
-                for origin in tp.origins:
-                    declared = self.payload_origins.get(origin)
-                    if declared is None or origin in self.refining_origins:
+    def static(self) -> tuple[dict, dict]:
+        """Static types of untypeable callbacks, by value id and variable."""
+
+        if self._static is not None:
+            return self._static
+        values: dict[int, Any] = {}
+        arguments: dict[str, Any] = {}
+        self._static = values, arguments
+        func_ir, context = self.func_ir, self.typeinfer.context
+        for block in func_ir.blocks.values():
+            for statement in block.find_insts(nb.ir.Assign):
+                call = statement.value
+                if not isinstance(call, nb.ir.Expr) or call.op != "call":
+                    continue
+                try:
+                    function = func_ir.infer_constant(call.func)
+                except nb.errors.ConstantInferenceError:
+                    continue
+                for operand, factory in operation_static_arguments.get(
+                    function, {}
+                ).items():
+                    variable = _argument(call, operand)
+                    if variable is None:
                         continue
-                    self.refining_origins.add(origin)
                     try:
-                        super().add_type(
-                            origin[1],
-                            declared.with_dtype(
-                                tp.dtype, max(declared.strength, tp.strength)
-                            ),
-                            loc,
-                        )
-                    finally:
-                        self.refining_origins.remove(origin)
-        super().add_type(var, tp, loc, unless_locked)
+                        value = func_ir.infer_constant(variable)
+                    except nb.errors.ConstantInferenceError:
+                        continue
+                    try:
+                        context.resolve_value_type(value)
+                    except ValueError:
+                        static_type = factory(value)
+                        values[id(value)] = static_type
+                        arguments[variable.name] = static_type
+        return self._static
 
-    def copy_type(self, src_var, dest_var, loc):
-        super().copy_type(src_var, dest_var, loc)
-        result = self.typevars[dest_var]
-        if result.defined and isinstance(result.getone(), ThreadDataType):
-            self.add_type(dest_var, result.getone(), loc)
 
-    def typeof_call(self, inst, target, call):
-        constraint = _CooperativeCall(
-            target.name,
-            call.func.name,
-            call.args,
-            call.kws,
-            call.vararg,
-            loc=inst.loc,
+def _inference(typeinfer: Any) -> _Inference:
+    return rules.local(typeinfer, _Inference, _Inference)
+
+
+# Rules ------------------------------------------------------------------------
+
+
+def _payload_gate(fnty, arg_types, constraint, released):
+    """Writes wait for a payload dtype; helpers wait for precise payloads.
+
+    An indexed write to a payload whose dtype is not yet known would fix it
+    through Numba's setitem refinement; producers and write agreement
+    establish it first. A separately compiled helper is typed against
+    whatever payload it is given, so it waits until the dtype is known.
+    """
+
+    if fnty is None:
+        target = arg_types[0]
+        if isinstance(target, ThreadDataType) and not target.is_precise():
+            return rules.HOLD
+        return None
+    if isinstance(fnty, nb.types.Dispatcher) and any(
+        _contains_imprecise_payload(arg) for arg in arg_types
+    ):
+        return rules.HOLD
+    return None
+
+
+def _static_controls(typeinfer, constraint, fnty, args, kws, resolve):
+    if type(constraint) is nb.typeinfer.CallConstraint:
+        args, kws = static_call_arguments(
+            typeinfer.func_ir, constraint, _typing_key(fnty), args, kws
         )
-        self.constraints.append(constraint)
-        self.calls.append((inst.value, constraint))
+    return resolve(fnty, args, kws)
 
-    def resolve_call(self, fnty, pos_args, kw_args):
-        if self.active_call is not None:
-            pos_args, kw_args = static_call_arguments(
-                self.func_ir,
-                self.active_call,
-                getattr(fnty, "typing_key", None),
-                pos_args,
-                kw_args,
-            )
-        if isinstance(fnty, nb.types.Dispatcher):
-            pos_args = tuple(_native_type(arg) for arg in pos_args)
-            kw_args = {name: _native_type(arg) for name, arg in kw_args.items()}
-        result = super().resolve_call(fnty, pos_args, kw_args)
-        if (
-            result is not None
-            and isinstance(result.return_type, nb.types.IteratorType)
-            and any(
-                _contains_imprecise_payload(arg)
-                for arg in (*pos_args, *kw_args.values())
-            )
-        ):
-            return None
+
+def _helper_arguments(typeinfer, constraint, fnty, args, kws, resolve):
+    if isinstance(fnty, nb.types.Dispatcher):
+        args = tuple(_native_type(arg) for arg in args)
+        kws = {name: _native_type(arg) for name, arg in kws.items()}
+    return resolve(fnty, args, kws)
+
+
+def _iteration_waits(typeinfer, constraint, fnty, args, kws, resolve):
+    result = resolve(fnty, args, kws)
+    if (
+        result is not None
+        and isinstance(result.return_type, nb.types.IteratorType)
+        and any(
+            _contains_imprecise_payload(arg) for arg in (*args, *kws.values())
+        )
+    ):
+        return None
+    return result
+
+
+def _constructor_signature(typeinfer, constraint, fnty, args, kws, resolve):
+    """A constructor call's signature returns its target's current type."""
+
+    result = resolve(fnty, args, kws)
+    if result is None or type(constraint) is not nb.typeinfer.CallConstraint:
         return result
+    typeinfer.add_type(constraint.target, result.return_type, constraint.loc)
+    return result.replace(
+        return_type=typeinfer.typevars[constraint.target].getone()
+    )
 
-    def typeof_setitem(self, inst):
-        native = nb.typeinfer.SetItemConstraint(
-            inst.target, inst.index, inst.value, inst.loc
+
+def _origins(typeinfer, var, tp, loc):
+    """Stamp a constructor's allocation origin; refine it from its aliases."""
+
+    state = _inference(typeinfer)
+    if state.unstamped is tp:
+        state.unstamped = None
+        return tp
+    key = state.constructor(var)
+    factory = constructor_origin_factories.get(key)
+    if factory is not None:
+        tp = factory(tp, (state.origin_scope, var))
+    if not isinstance(tp, ThreadDataType):
+        return tp
+    if key in _payload_constructors:
+        origin = (state.origin_scope, var)
+        origins = frozenset({origin})
+        inferred = (
+            frozenset()
+            if tp.is_precise() and tp.strength == EXPLICIT
+            else origins
         )
-        constraint = _PayloadSetItem(native)
-        self.constraints.append(constraint)
-        self.calls.append((inst, constraint))
-        self.payload_writes.append(_PayloadWrite(inst))
+        tp = tp.with_origins(origins, inferred)
+        state.payload_origins.setdefault(origin, tp)
+    if tp.is_precise():
+        for origin in tp.origins:
+            declared = state.payload_origins.get(origin)
+            if declared is None or origin in state.refining_origins:
+                continue
+            refined = declared.with_dtype(
+                tp.dtype, max(declared.strength, tp.strength)
+            )
+            state.refining_origins.add(origin)
+            state.unstamped = refined
+            try:
+                typeinfer.add_type(origin[1], refined, loc)
+            finally:
+                state.unstamped = None
+                state.refining_origins.remove(origin)
+    return tp
 
-    def typeof_static_setitem(self, inst):
-        native = nb.typeinfer.StaticSetItemConstraint(
-            inst.target, inst.index, inst.index_var, inst.value, inst.loc
+
+def _static_value(typeinfer, inst, value):
+    return _inference(typeinfer).static()[0].get(id(value))
+
+
+def _static_argument(typeinfer, inst):
+    return _inference(typeinfer).static()[1].get(inst.target.name)
+
+
+def _apply_contract(typeinfer, call):
+    state = _inference(typeinfer)
+    raised = []
+    for mutation in state.mutations_of(call):
+        try:
+            mutation(state)
+        except nb.errors.TypingError as exc:
+            raised.append(exc)
+    return raised
+
+
+def _apply_write(typeinfer, constraint):
+    if isinstance(
+        constraint,
+        (nb.typeinfer.SetItemConstraint, nb.typeinfer.StaticSetItemConstraint),
+    ):
+        state = _inference(typeinfer)
+        state.write_of(constraint)(state)
+
+
+def _store_fallback(typeinfer, matching, waiting):
+    """Let a Store destination type a payload whose writes all depend."""
+
+    state = _inference(typeinfer)
+    if state.allow_fallback or state.allow_dependent_writes:
+        return None
+    if any(
+        mutation.strength == STORE_DST
+        and isinstance(
+            payload := state.variable_type(mutation.payload), ThreadDataType
         )
-        constraint = _PayloadSetItem(native)
-        self.constraints.append(constraint)
-        self.calls.append((inst, constraint))
-        self.payload_writes.append(_PayloadWrite(inst))
+        and not payload.is_precise()
+        for mutation in state.payload_mutations()
+    ):
+        state.allow_fallback = True
+        return rules.PROGRESS
+    return None
 
-    def build_constraint(self):
-        super().build_constraint()
-        for mutation in self.payload_mutations:
-            self.constraints.append(mutation)
-        for write in self.payload_writes:
-            self.constraints.append(write)
+
+def _dependent_writes(typeinfer, matching, waiting):
+    """Then let writes that read inferred allocations type their target."""
+
+    state = _inference(typeinfer)
+    if state.allow_dependent_writes:
+        return None
+    if state.payload_origins and any(state.payload_writes()):
+        state.allow_dependent_writes = True
+        return rules.PROGRESS
+    return None
+
+
+_registered = False
+
+
+def register() -> None:
+    """Register the cooperative typing rules, after every family's contracts."""
+
+    global _registered
+    if _registered:
+        return
+    from ._temp_storage import TempStorageType
+    from ._templates import kernel_primitives
+
+    _payload_constructors.update(
+        function
+        for function, name in kernel_primitives().items()
+        if name.rsplit(".", 1)[-1] == "ThreadData"
+    )
+    rules.register(ThreadDataType, rules.GATE, _payload_gate)
+    for key in operation_literal_arguments:
+        rules.register(key, rules.CALL, _static_controls)
+    rules.register(ThreadDataType, rules.CALL, _helper_arguments)
+    rules.register(ThreadDataType, rules.CALL, _iteration_waits)
+    for key in (*_payload_constructors, *constructor_origin_factories):
+        rules.register(key, rules.CALL, _constructor_signature)
+    rules.register(ThreadDataType, rules.ADD, _origins)
+    rules.register(TempStorageType, rules.ADD, _origins)
+    rules.register(None, rules.VALUE, _static_value)
+    rules.register(None, rules.ASSIGN, _static_argument)
+    for key in operation_inference_contracts:
+        rules.register(key, rules.AFTER, _apply_contract)
+    rules.register(ThreadDataType, rules.AFTER, _apply_write)
+    rules.register(ThreadDataType, rules.SETTLE, _store_fallback, priority=0)
+    rules.register(ThreadDataType, rules.SETTLE, _dependent_writes, priority=1)
+    _registered = True
 
 
 __all__ = [
-    "CooperativeTypeInferer",
     "DtypeSource",
     "OperationInference",
     "constructor_origin_factories",
@@ -549,5 +636,6 @@ __all__ = [
     "operation_inference_contracts",
     "operation_literal_arguments",
     "operation_static_arguments",
+    "register",
     "static_call_arguments",
 ]
