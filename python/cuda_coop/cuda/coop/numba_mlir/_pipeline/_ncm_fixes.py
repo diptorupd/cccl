@@ -48,18 +48,16 @@ _PULL = "https://github.com/NVIDIA/numba-cuda-mlir/pull/"
 class Fix:
     """A Numba-CUDA-MLIR change the typed pipeline relies on.
 
-    ``pull`` is the upstream pull request, or ``None`` while there is none.
+    ``pull`` is the upstream pull request.
     """
 
     name: str
     ask: str
-    pull: int | None
+    pull: int
     probe: Callable[[], bool]
 
     @property
     def reference(self) -> str:
-        if self.pull is None:
-            return f"{self.ask}, upstream fix in progress"
         return f"NVIDIA/numba-cuda-mlir#{self.pull}, {_PULL}{self.pull}"
 
 
@@ -205,7 +203,7 @@ def _has_tuple_refinement() -> bool:
 TUPLE_REFINEMENT = Fix(
     name="tuple refinement",
     ask="U-H1-4",
-    pull=None,
+    pull=396,
     probe=_has_tuple_refinement,
 )
 

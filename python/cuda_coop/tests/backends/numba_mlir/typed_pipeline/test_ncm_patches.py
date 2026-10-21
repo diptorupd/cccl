@@ -63,13 +63,6 @@ def patched() -> list[str]:
     from cuda.coop.numba_mlir._pipeline import _ncm_fixes
 
     names = []
-    if not _ncm_fixes.present(_ncm_fixes.TUPLE_REFINEMENT):
-        names += [
-            "BuildTupleConstraint.__call__",
-            "BuildTupleConstraint.refine",
-            "StaticGetItemConstraint.__call__",
-            "StaticGetItemConstraint.refine",
-        ]
     if not _ncm_fixes.present(_ncm_fixes.TYPEINFER_HOOKS):
         names += ["CallConstraint.resolve", "TypeInferer.propagate"]
     return sorted(names)
@@ -130,7 +123,7 @@ print("unchanged", [dict(vars(owner)) for owner in owners] == before)
 def _stands_in() -> bool:
     from ._support import native
 
-    return not (native("TYPEINFER_HOOKS") and native("TUPLE_REFINEMENT"))
+    return not native("TYPEINFER_HOOKS")
 
 
 @pytest.mark.skipif(
@@ -171,7 +164,6 @@ def test_the_pins_match_the_installed_compiler():
 
     fixes = _ncm_fixes()
     _ncm_patches.stand_in(fixes.TYPEINFER_HOOKS, _typing_rules.ENGINE)
-    _ncm_patches.stand_in(fixes.TUPLE_REFINEMENT, _ncm_patches.TUPLE_REFINEMENT)
 
 
 def _ncm_fixes():
@@ -376,41 +368,54 @@ print("present", _ncm_fixes.present(_ncm_fixes.TUPLE_REFINEMENT))
     assert "present False" in result.stdout
 
 
-def test_without_tuple_refinement_a_patch_that_does_not_apply_fails_closed():
-    code = (
-        _NO_NATIVE_TUPLE_REFINEMENT
-        + """
-call = getitem.__call__
-getitem.__call__ = lambda self, typeinfer_: call(self, typeinfer_)
+_ALIASED = """
+from numba_cuda_mlir import types
+from numba_cuda_mlir.numba_cuda.core.errors import TypingError
+
+from cuda import coop
+from cuda.coop.numba_mlir._pipeline import testing
+
+
+def aliased(source, output):
+    block = coop.this_block()
+    items = coop.ThreadData(4)
+    alias = (items,)[0]
+    coop.load(block, source, alias)
+    coop.store(block, output, alias)
+
+
+f32 = types.float32[::1]
 try:
-    import cuda.coop.numba_mlir._pipeline as pipeline
-    pipeline._activate()
-except ImportError as exc:
+    testing.compile_kernel(
+        aliased, types.void(f32, f32), block=(128, 1, 1), chip="sm_120"
+    )
+    print("compiled")
+except TypingError as exc:
     print(type(exc).__name__, exc)
 """
-    )
-    result = run_python(code, "typed")
+
+
+def test_without_the_fix_a_tuple_of_thread_data_names_it():
+    result = run_python(_NO_NATIVE_TUPLE_REFINEMENT + _ALIASED, "typed")
     assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("TypedPipelineError ")
     assert (
-        "does not have the tuple refinement fix (U-H1-4, upstream fix in "
-        "progress), and the patch that stands in for it does not apply: The "
-        "cuda.coop typed pipeline's 'tuple refinement' patch was written "
-        "against Numba-CUDA-MLIR 0.5.4, but"
+        "Using ThreadData without dtype= through a tuple ('items') needs "
+        "Numba-CUDA-MLIR's tuple refinement fix (NVIDIA/numba-cuda-mlir#396, "
+        "https://github.com/NVIDIA/numba-cuda-mlir/pull/396); the installed "
+        "Numba-CUDA-MLIR"
     ) in result.stdout
-    assert result.stdout.startswith("TypedPipelineUnavailableError ")
+    assert "Pass dtype= to the ThreadData." in result.stdout
 
 
-def test_tuple_refinement_is_scoped_to_thread_data():
-    from numba_cuda_mlir import types
-
-    from cuda.coop.numba_mlir._pipeline._ncm_patches import holds_thread_data
-    from cuda.coop.numba_mlir._pipeline._types import ThreadDataType
-
-    payload = ThreadDataType(types.float32, 4)
-    plain = types.float32[::1]
-    assert holds_thread_data(types.Tuple((plain, types.UniTuple(payload, 1))))
-    assert not holds_thread_data(types.Tuple((plain, types.int64)))
-    assert not holds_thread_data(plain)
+def test_a_tuple_of_thread_data_compiles_exactly_with_the_fix():
+    result = run_python(_ALIASED, "typed")
+    assert result.returncode == 0, result.stderr
+    fixes = _ncm_fixes()
+    if fixes.present(fixes.TUPLE_REFINEMENT):
+        assert result.stdout.startswith("compiled")
+    else:
+        assert "needs Numba-CUDA-MLIR's tuple refinement fix" in result.stdout
 
 
 @requires_typed_pipeline

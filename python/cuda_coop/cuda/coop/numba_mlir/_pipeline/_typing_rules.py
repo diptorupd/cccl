@@ -58,7 +58,8 @@ from functools import reduce
 from typing import Any, NamedTuple
 
 from . import _bridges as nb
-from ._ncm_patches import Patch, Pin, typeinfer
+from ._ncm_fixes import typeinfer
+from ._ncm_patches import Patch, Pin
 
 GATE, SETTLE, CHECK = "gate", "settle", "check"
 KINDS = (GATE, SETTLE, CHECK)

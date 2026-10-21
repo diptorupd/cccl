@@ -27,10 +27,6 @@ MLIR dialects, lowering utilities      public re-exports
 ``external_abi_function_type``         a public external-call builder
 ``cast_value``                         a public value-conversion helper for
                                        lowering
-patch: tuple refinement                U-H1-4: refine hooks for
-                                       ``static_getitem`` and ``build_tuple``.
-                                       Not applied with the compiler's own
-                                       tuple refinement
 patch: typing rules                    U-R1 to U-R3: a typing-rule bucket in
 (``_typing_rules.ENGINE``)             the registry; a gate before a call
                                        resolves; strata at the fixed point.
@@ -42,15 +38,16 @@ Importing this module fails with ``TypedPipelineUnavailableError`` when any
 of these interfaces is missing, before anything is registered, so that an
 unsupported compiler fails closed instead of compiling kernels incorrectly.
 
-Rows marked "patch" change Numba-CUDA-MLIR's own behaviour. They live in
-``_ncm_patches``, are pinned to Numba-CUDA-MLIR 0.5.4 and to the source of
-what they replace, and are applied only when the typed pipeline activates
-on a compiler that lacks the fix, which ``_ncm_fixes`` probes for; a
-mismatch fails closed in the same way. A fix with no patch, the
-argument-sized ``cuda.local.array`` of NVIDIA/numba-cuda-mlir#394 or the
-phi refinement of NVIDIA/numba-cuda-mlir#395, is needed only by the
-kernels that use it, which ``_missing_fixes`` refuses on a compiler
-without the fix.
+The row marked "patch" changes Numba-CUDA-MLIR's own behaviour. It lives
+in ``_typing_rules``, is pinned through ``_ncm_patches`` to Numba-CUDA-MLIR
+0.5.4 and to the source of what it replaces, and is applied only when the
+typed pipeline activates on a compiler that lacks the fix, which
+``_ncm_fixes`` probes for; a mismatch fails closed in the same way. A fix
+with no patch, the argument-sized ``cuda.local.array`` of
+NVIDIA/numba-cuda-mlir#394, the phi refinement of
+NVIDIA/numba-cuda-mlir#395 or the tuple refinement of
+NVIDIA/numba-cuda-mlir#396, is needed only by the kernels that use it,
+which ``_missing_fixes`` refuses on a compiler without the fix.
 """
 
 from __future__ import annotations

@@ -27,7 +27,13 @@ from numba_cuda_mlir import cuda, types
 from cuda import coop
 from cuda.coop.numba_mlir._pipeline import testing
 
-from .._support import CHIP, TYPED, native, requires_typed_pipeline
+from .._support import (
+    CHIP,
+    TYPED,
+    native,
+    requires_fix,
+    requires_typed_pipeline,
+)
 
 pytestmark = requires_typed_pipeline
 
@@ -467,6 +473,7 @@ def test_case(name):
     assert re.search(pattern, typed_ir, re.MULTILINE), typed_ir
 
 
+@requires_fix("TUPLE_REFINEMENT")
 def test_a_load_through_a_tuple_types_the_payload():
     """A tuple projection refines the payload it projects."""
 
