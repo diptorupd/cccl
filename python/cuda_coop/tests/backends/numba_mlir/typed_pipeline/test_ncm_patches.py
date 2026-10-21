@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ._support import TYPED, requires_typed_pipeline, run_python
+from ._support import TYPED, requires_fix, requires_typed_pipeline, run_python
 
 _TARGETS = """
 from numba_cuda_mlir.typing import cuda as cuda_typing
@@ -60,11 +60,7 @@ def patched() -> list[str]:
 
     from cuda.coop.numba_mlir._pipeline import _ncm_fixes
 
-    names = [
-        "CallConstraint.refine",
-        "LocalArrayTemplate.generic",
-        "Propagate.__call__",
-    ]
+    names = ["CallConstraint.refine", "Propagate.__call__"]
     if not _ncm_fixes.present(_ncm_fixes.TUPLE_REFINEMENT):
         names += [
             "BuildTupleConstraint.__call__",
@@ -91,28 +87,42 @@ def test_the_typed_pipeline_replaces_only_its_patch_targets():
     assert f"changed {patched()}" in result.stdout
 
 
+def _pinned_compiler() -> bool:
+    import numba_cuda_mlir
+
+    from cuda.coop.numba_mlir._pipeline import _ncm_patches
+
+    return numba_cuda_mlir.__version__ == _ncm_patches.NCM_VERSION
+
+
+@pytest.mark.skipif(
+    not _pinned_compiler(),
+    reason="a patch's pins are checked only on the compiler they name",
+)
 def test_a_changed_patch_target_fails_closed():
     code = (
         _TARGETS
         + """
-cuda_typing.GenericArrayTemplate.generic = lambda self: None
+refine = typeinfer.CallConstraint.refine
+typeinfer.CallConstraint.refine = lambda self, ti, ty: refine(self, ti, ty)
+before = [dict(vars(owner)) for owner in owners]
 try:
     import cuda.coop.numba_mlir._pipeline as pipeline
     pipeline._activate()
 except ImportError as exc:
     print(type(exc).__name__, exc)
-print("local-array", "generic" in vars(cuda_typing.LocalArrayTemplate))
+print("unchanged", [dict(vars(owner)) for owner in owners] == before)
 """
     )
     result = run_python(code, "typed")
     assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("TypedPipelineUnavailableError ")
     assert (
-        "TypedPipelineUnavailableError The cuda.coop typed pipeline's "
-        "'argument-sized cuda.local.array' patch was written against "
-        "Numba-CUDA-MLIR 0.5.4, but GenericArrayTemplate.generic has "
-        "changed. The patch is retired by U-P-1"
+        "The cuda.coop typed pipeline's 'phi refinement' patch was written "
+        "against Numba-CUDA-MLIR 0.5.4, but CallConstraint.refine has "
+        "changed. The patch is retired by U-H1-3"
     ) in result.stdout
-    assert "local-array False" in result.stdout
+    assert "unchanged True" in result.stdout
 
 
 def test_another_compiler_version_fails_closed():
@@ -196,8 +206,83 @@ def test_the_typed_pipeline_runs_the_rules_on_the_hooks_when_present():
 
 # Argument-sized cuda.local.array (U-P-1) ------------------------------------
 
+_NO_LITERAL_LOCAL_ARRAY_SHAPE = """
+from numba_cuda_mlir.typing import cuda as cuda_typing
+
+cuda_typing.LocalArrayTemplate.request_literal_shape = False
+"""
+
+_ARGUMENT_SIZED = """
+import cuda.coop.numba_mlir
+import numpy as np
+from numba_cuda_mlir import cuda, types
+from numba_cuda_mlir.numba_cuda.core.errors import TypingError
+
+@cuda.jit
+def sized(output, n):
+    values = cuda.local.array(n, types.int32)
+    values[0] = 1
+    output[0] = values[0]
+
+
+try:
+    sized[1, 1](np.zeros(1, np.int32), 3)
+    print("compiled")
+except TypingError as exc:
+    print(type(exc).__name__, exc)
+"""
+
+
+def test_the_local_array_probe_agrees_with_the_compiler():
+    from numba_cuda_mlir.typing import cuda as cuda_typing
+
+    fixes = _ncm_fixes()
+    assert fixes.present(fixes.LOCAL_ARRAY_SHAPE) == getattr(
+        cuda_typing.LocalArrayTemplate, "request_literal_shape", False
+    )
+
+
+def test_the_local_array_probe_fails_without_the_fix():
+    code = (
+        _NO_LITERAL_LOCAL_ARRAY_SHAPE
+        + """
+from cuda.coop.numba_mlir._pipeline import _ncm_fixes
+print("present", _ncm_fixes.present(_ncm_fixes.LOCAL_ARRAY_SHAPE))
+"""
+    )
+    result = run_python(code, None)
+    assert result.returncode == 0, result.stderr
+    assert "present False" in result.stdout
+
+
+def test_without_the_fix_an_argument_sized_local_array_names_it():
+    result = run_python(
+        _NO_LITERAL_LOCAL_ARRAY_SHAPE + _ARGUMENT_SIZED, "typed"
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("TypingError ")
+    assert (
+        "A cuda.local.array whose shape is a non-literal int64 needs "
+        "Numba-CUDA-MLIR's argument-sized cuda.local.array fix "
+        "(NVIDIA/numba-cuda-mlir#394, "
+        "https://github.com/NVIDIA/numba-cuda-mlir/pull/394); the installed "
+        "Numba-CUDA-MLIR"
+    ) in result.stdout
+    assert "Size it with a literal or a global constant." in result.stdout
+
+
+def test_an_argument_sized_local_array_compiles_exactly_with_the_fix():
+    result = run_python(_ARGUMENT_SIZED, "typed")
+    assert result.returncode == 0, result.stderr
+    fixes = _ncm_fixes()
+    if fixes.present(fixes.LOCAL_ARRAY_SHAPE):
+        assert result.stdout.startswith("compiled")
+    else:
+        assert "needs Numba-CUDA-MLIR's argument-sized" in result.stdout
+
 
 @requires_typed_pipeline
+@requires_fix("LOCAL_ARRAY_SHAPE")
 def test_a_plain_kernel_with_an_argument_sized_local_array_compiles():
     from numba_cuda_mlir import cuda, types
 
@@ -219,6 +304,7 @@ def test_a_plain_kernel_with_an_argument_sized_local_array_compiles():
 
 
 @requires_typed_pipeline
+@requires_fix("LOCAL_ARRAY_SHAPE")
 def test_a_computed_local_array_shape_is_still_refused():
     from numba_cuda_mlir import cuda, types
     from numba_cuda_mlir.numba_cuda.core.errors import TypingError

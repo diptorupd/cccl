@@ -37,6 +37,15 @@ def native(name: str) -> bool:
     return _ncm_fixes.present(getattr(_ncm_fixes, name))
 
 
+def requires_fix(name: str) -> pytest.MarkDecorator:
+    """Skip a typed-mode test on a compiler without the fix ``name``."""
+
+    return pytest.mark.skipif(
+        TYPED and not native(name),
+        reason=f"the installed Numba-CUDA-MLIR lacks the {name} fix",
+    )
+
+
 # Compile-only tests pin the target and stand in for the launch's block.
 CHIP = "sm_120"
 BLOCK = (128, 1, 1)

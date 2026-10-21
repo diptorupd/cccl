@@ -10,9 +10,12 @@ function that types only with the fix, and checks the result. A compiler
 with the fix backported passes, and one that has the fix's names but not
 its behaviour fails.
 
-The probes need no GPU and change no registry: the imprecise value they
-refine comes from a function type passed as an argument. Each probe runs
-once per process, when the typed pipeline activates.
+The probes need no GPU and change no registry: the imprecise value the
+refinement probes refine comes from a function type passed as an argument.
+Each probe runs once per process, when the typed pipeline activates.
+
+Where a fix has no patch to stand in for it, ``_missing_fixes`` refuses a
+kernel that needs it with an error naming the fix.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from functools import cache
 from typing import Any
 
 import numba_cuda_mlir
+from numba_cuda_mlir import cuda, types
 
 from . import _bridges as nb
 
@@ -206,7 +210,34 @@ TUPLE_REFINEMENT = Fix(
 )
 
 
+# Argument-sized cuda.local.array (U-P-1) ------------------------------------
+
+
+def _sized(n):
+    cuda.local.array(n, types.float32)
+
+
+def _has_literal_local_array_shape() -> bool:
+    """A ``cuda.local.array`` sized by an integer argument requests the
+    argument as a literal."""
+
+    _, errors = infer(_sized, nb.types.int64)
+    return any(
+        isinstance(e, typeinfer.ForceLiteralArg) and e.requested_args == {0}
+        for e in errors
+    )
+
+
+LOCAL_ARRAY_SHAPE = Fix(
+    name="argument-sized cuda.local.array",
+    ask="U-P-1",
+    pull=394,
+    probe=_has_literal_local_array_shape,
+)
+
+
 __all__ = [
+    "LOCAL_ARRAY_SHAPE",
     "TUPLE_REFINEMENT",
     "TYPEINFER_HOOKS",
     "Fix",

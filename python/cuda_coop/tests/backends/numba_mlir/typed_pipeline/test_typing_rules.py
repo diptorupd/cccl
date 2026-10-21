@@ -18,7 +18,7 @@ from cuda.coop.numba_mlir._pipeline import _payload_rules, testing
 from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
 from cuda.coop.numba_mlir._pipeline._typing_rules import RULES, Event
 
-from ._support import BLOCK, CHIP, f32_in_out, requires_typed_pipeline
+from ._support import BLOCK, CHIP, f32_in_out, native, requires_typed_pipeline
 
 
 def _compile(kernel):
@@ -32,11 +32,14 @@ def _line(fn, text):
 
 @requires_typed_pipeline
 def test_the_registered_rules_are_coops_typing_spec():
-    assert [row[:3] for row in RULES.describe()] == [
+    expected = [
         ("gate", "ThreadDataType", "read_after_producers"),
         ("check", "ThreadDataType", "released_reads_agree"),
         ("check", "ThreadDataType", "writes_agree"),
     ]
+    if not native("LOCAL_ARRAY_SHAPE"):
+        expected.insert(1, ("gate", "Function", "argument_sized_local_array"))
+    assert [row[:3] for row in RULES.describe()] == expected
 
 
 def test_a_key_matches_instances_tuples_and_receivers():
@@ -171,6 +174,7 @@ def test_a_producer_that_depends_on_a_released_read_is_refused():
 
 @requires_typed_pipeline
 def test_a_plain_kernel_runs_no_rule():
+    from cuda.coop.numba_mlir._pipeline import _missing_fixes
     from cuda.coop.numba_mlir._pipeline._typing_rules import RULES
 
     @cuda.jit
@@ -185,7 +189,8 @@ def test_a_plain_kernel_runs_no_rule():
 
     lookups, calls = RULES.lookups, RULES.calls
     output = np.zeros(32, np.float32)
-    plain[1, 32](np.arange(4, dtype=np.float32), output)
+    with RULES.without(_missing_fixes.argument_sized_local_array):
+        plain[1, 32](np.arange(4, dtype=np.float32), output)
     np.testing.assert_array_equal(output, 12)
     assert RULES.lookups > lookups
     assert RULES.calls == calls

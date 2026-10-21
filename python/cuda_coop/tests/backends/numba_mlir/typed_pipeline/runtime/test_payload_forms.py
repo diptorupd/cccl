@@ -20,7 +20,7 @@ from numba_cuda_mlir import cuda, types
 import cuda.coop.numba_mlir as qualified_coop
 from cuda import coop
 
-from .._support import requires_typed_pipeline
+from .._support import requires_fix, requires_typed_pipeline
 
 pytestmark = requires_typed_pipeline
 
@@ -68,6 +68,7 @@ def test_items_per_thread_before_the_dtype_is_known():
     np.testing.assert_array_equal(output, np.arange(THREADS * 4))
 
 
+@requires_fix("LOCAL_ARRAY_SHAPE")
 @pytest.mark.parametrize("algorithm", ["direct", "transpose"])
 def test_a_local_array_payload_sized_by_a_kernel_argument(algorithm):
     @cuda.jit

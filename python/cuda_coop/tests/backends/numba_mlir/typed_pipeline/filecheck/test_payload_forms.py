@@ -15,13 +15,21 @@ from __future__ import annotations
 
 import pytest
 from numba_cuda_mlir import cuda, types
-from numba_cuda_mlir.numba_cuda.core.errors import ForceLiteralArg
+from numba_cuda_mlir.numba_cuda.core.errors import ForceLiteralArg, TypingError
 
 import cuda.coop.numba_mlir as qualified_coop
 from cuda import coop
 from cuda.coop.numba_mlir._pipeline import testing
 
-from .._support import BLOCK, CHIP, f32_in_out, requires_typed_pipeline
+from .._support import (
+    BLOCK,
+    CHIP,
+    TYPED,
+    f32_in_out,
+    native,
+    requires_fix,
+    requires_typed_pipeline,
+)
 
 pytestmark = requires_typed_pipeline
 
@@ -51,6 +59,7 @@ def test_items_per_thread_is_the_extent_as_a_literal():
     )
 
 
+@requires_fix("LOCAL_ARRAY_SHAPE")
 def test_a_local_array_sized_by_a_kernel_argument_requests_a_literal():
     # A launch retries the kernel with the argument as a literal, which
     # compiles as in the next test.
@@ -64,6 +73,25 @@ def test_a_local_array_sized_by_a_kernel_argument_requests_a_literal():
     with pytest.raises(ForceLiteralArg) as raised:
         testing.compile_kernel(kernel, signature, block=BLOCK, chip=CHIP)
     assert raised.value.requested_args == {2}
+
+
+@pytest.mark.skipif(
+    TYPED and native("LOCAL_ARRAY_SHAPE"), reason="the compiler has the fix"
+)
+def test_without_the_fix_a_local_array_sized_by_a_kernel_argument_names_it():
+    def kernel(source, output, items_per_thread):
+        block = qualified_coop.this_block()
+        items = cuda.local.array(items_per_thread, types.float32)
+        qualified_coop.load(block, source, items)
+        qualified_coop.store(block, output, items)
+
+    signature = types.void(*f32_in_out().args, types.int64)
+    with pytest.raises(
+        TypingError,
+        match=r"argument-sized cuda\.local\.array fix "
+        r"\(NVIDIA/numba-cuda-mlir#394, ",
+    ):
+        testing.compile_kernel(kernel, signature, block=BLOCK, chip=CHIP)
 
 
 def test_a_local_array_payload_sized_by_a_literal_argument():

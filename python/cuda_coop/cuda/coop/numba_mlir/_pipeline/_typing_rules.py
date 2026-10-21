@@ -20,7 +20,8 @@ Kind       Called as, and what it may do
            matches. Returning ``WAIT`` leaves the call untyped for now; it
            is retried on every round, and once propagation is otherwise
            stuck it is released: ``released`` is then true and the call
-           types whatever the rule returns.
+           types whatever the rule returns. Raising a ``TypingError``
+           refuses the call.
 ``settle`` ``fn(typeinfer, matching, waiting)`` at each fixed point, with the
            matching type variables and the waiting calls. It may only widen
            types, through ``typeinfer.add_type``, and returns a list of

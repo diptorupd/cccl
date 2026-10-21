@@ -43,7 +43,6 @@ NCM_VERSION = "0.5.4"
 
 try:
     from numba_cuda_mlir.numba_cuda.core import typeinfer
-    from numba_cuda_mlir.typing import cuda as cuda_typing
 except ImportError as exc:
     raise nb.TypedPipelineUnavailableError(
         "The cuda.coop typed pipeline patches Numba-CUDA-MLIR "
@@ -119,62 +118,6 @@ def holds_thread_data(ty: Any) -> bool:
     return isinstance(ty, nb.types.BaseTuple) and any(
         holds_thread_data(item) for item in ty.types
     )
-
-
-# Argument-sized cuda.local.array (U-P-1) ------------------------------------
-
-_LOCAL_ARRAY_PARAMETERS = ("shape", "dtype", "alignment", "alignas")
-
-
-def _fold_local_array_arguments(args, kws) -> tuple:
-    bound = dict(zip(_LOCAL_ARRAY_PARAMETERS, args))
-    bound.update(dict(kws))
-    return tuple(bound[n] for n in _LOCAL_ARRAY_PARAMETERS if n in bound)
-
-
-def _local_array_generic(self) -> Callable:
-    """Type ``cuda.local.array`` and request a non-literal shape as a literal.
-
-    Numba-CUDA-MLIR finds no match for a ``cuda.local.array`` whose shape is
-    a non-literal integer. When the call would type with a literal shape,
-    this raises ``ForceLiteralArg`` for the shape instead, so a shape that
-    is a kernel argument is retried as a literal: the kernel compiles once
-    per distinct value of that argument. A shape that is not a kernel
-    argument is still refused, with Numba's "Cannot request literal type".
-    Tuple shapes are unchanged, since the launcher retries only scalar
-    arguments as literals.
-
-    Scope: error to success. A call that typed before types the same.
-    """
-
-    typer = cuda_typing.GenericArrayTemplate.generic(self)
-
-    def literal_shape_typer(shape, dtype, alignment=None, alignas=None):
-        sig = typer(shape, dtype, alignment, alignas)
-        if (
-            sig is None
-            and isinstance(shape, nb.types.Integer)
-            and not isinstance(shape, nb.types.IntegerLiteral)
-            and typer(nb.types.IntegerLiteral(1), dtype, alignment, alignas)
-            is not None
-        ):
-            raise nb.force_literal_arg({0}, _fold_local_array_arguments)
-        return sig
-
-    return literal_shape_typer
-
-
-LOCAL_ARRAY_SHAPE = Patch(
-    name="argument-sized cuda.local.array",
-    ask="U-P-1 (cuda.local.array requests a literal shape)",
-    pins=(
-        Pin(cuda_typing.GenericArrayTemplate, "generic", "280ceb177adabb9b"),
-        Pin(cuda_typing.LocalArrayTemplate, "generic", None),
-    ),
-    build=lambda: (
-        (cuda_typing.LocalArrayTemplate, "generic", _local_array_generic),
-    ),
-)
 
 
 # Payload through a tuple alias (U-H1-4) -------------------------------------
@@ -330,7 +273,7 @@ JOIN_REFINEMENT = Patch(
     build=_join_refinement,
 )
 
-PATCHES = (LOCAL_ARRAY_SHAPE, JOIN_REFINEMENT)
+PATCHES = (JOIN_REFINEMENT,)
 
 _ABSENT = object()
 _replaced: list[tuple[type, str, Any]] = []
@@ -382,7 +325,6 @@ def replaced() -> tuple[tuple[type, str], ...]:
 
 __all__ = [
     "JOIN_REFINEMENT",
-    "LOCAL_ARRAY_SHAPE",
     "NCM_VERSION",
     "PATCHES",
     "TUPLE_REFINEMENT",
