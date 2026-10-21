@@ -210,6 +210,32 @@ TUPLE_REFINEMENT = Fix(
 )
 
 
+# Phi refinement (U-H1-3) ----------------------------------------------------
+
+
+def _joined(make, flag):
+    if flag:
+        x = make()
+    else:
+        x = make()
+    x[0] = 1.0
+
+
+def _has_phi_refinement() -> bool:
+    """A write through a phi of two imprecise values refines both."""
+
+    inferer, errors = infer(_joined, _undefined_array(), nb.types.boolean)
+    return not errors and all_precise(inferer)
+
+
+PHI_REFINEMENT = Fix(
+    name="phi refinement",
+    ask="U-H1-3",
+    pull=395,
+    probe=_has_phi_refinement,
+)
+
+
 # Argument-sized cuda.local.array (U-P-1) ------------------------------------
 
 
@@ -238,6 +264,7 @@ LOCAL_ARRAY_SHAPE = Fix(
 
 __all__ = [
     "LOCAL_ARRAY_SHAPE",
+    "PHI_REFINEMENT",
     "TUPLE_REFINEMENT",
     "TYPEINFER_HOOKS",
     "Fix",

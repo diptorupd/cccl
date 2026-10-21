@@ -27,7 +27,7 @@ from numba_cuda_mlir import cuda, types
 from cuda import coop
 from cuda.coop.numba_mlir._pipeline import testing
 
-from .._support import CHIP, requires_typed_pipeline
+from .._support import CHIP, TYPED, native, requires_typed_pipeline
 
 pytestmark = requires_typed_pipeline
 
@@ -373,7 +373,16 @@ CASES = {
         (F32, F32, I32),
         error=r"cannot share a variable with a plain array",
     ),
-    "c3": Case(c3, (F32, F32, I32), ("b", F32_PRODUCER)),
+    # Without the phi-refinement fix the join is refused, naming the fix.
+    "c3": (
+        Case(c3, (F32, F32, I32), ("b", F32_PRODUCER))
+        if not TYPED or native("PHI_REFINEMENT")
+        else Case(
+            c3,
+            (F32, F32, I32),
+            error=r"phi refinement fix \(NVIDIA/numba-cuda-mlir#395",
+        )
+    ),
     "h_after": Case(h_after, (F32, F32), ("td", F32_PRODUCER)),
     "h_before": Case(h_before, (F32, F32), ("td", F32_PRODUCER)),
     "h_fill": Case(

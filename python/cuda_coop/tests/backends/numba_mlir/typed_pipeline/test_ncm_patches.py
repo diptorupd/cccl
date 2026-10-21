@@ -2,8 +2,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""The typed pipeline's Numba-CUDA-MLIR patches: when they apply, their pins,
-and how kernels without cooperative types behave under them.
+"""The Numba-CUDA-MLIR fixes the typed pipeline relies on: their probes, the
+patches that stand in for them and their pins, the error for a kernel that
+needs a fix the compiler lacks, and how kernels without cooperative types
+behave.
 
 Activation tests start a fresh interpreter per case and run in any mode; the
 kernels need typed mode.
@@ -60,7 +62,7 @@ def patched() -> list[str]:
 
     from cuda.coop.numba_mlir._pipeline import _ncm_fixes
 
-    names = ["CallConstraint.refine", "Propagate.__call__"]
+    names = []
     if not _ncm_fixes.present(_ncm_fixes.TUPLE_REFINEMENT):
         names += [
             "BuildTupleConstraint.__call__",
@@ -103,8 +105,8 @@ def test_a_changed_patch_target_fails_closed():
     code = (
         _TARGETS
         + """
-refine = typeinfer.CallConstraint.refine
-typeinfer.CallConstraint.refine = lambda self, ti, ty: refine(self, ti, ty)
+resolve = typeinfer.CallConstraint.resolve
+typeinfer.CallConstraint.resolve = lambda self, *args: resolve(self, *args)
 before = [dict(vars(owner)) for owner in owners]
 try:
     import cuda.coop.numba_mlir._pipeline as pipeline
@@ -118,13 +120,22 @@ print("unchanged", [dict(vars(owner)) for owner in owners] == before)
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("TypedPipelineUnavailableError ")
     assert (
-        "The cuda.coop typed pipeline's 'phi refinement' patch was written "
-        "against Numba-CUDA-MLIR 0.5.4, but CallConstraint.refine has "
-        "changed. The patch is retired by U-H1-3"
+        "The cuda.coop typed pipeline's 'typing rules' patch was written "
+        "against Numba-CUDA-MLIR 0.5.4, but CallConstraint.resolve has "
+        "changed. The patch is retired by U-R1 to U-R3"
     ) in result.stdout
     assert "unchanged True" in result.stdout
 
 
+def _stands_in() -> bool:
+    from ._support import native
+
+    return not (native("TYPEINFER_HOOKS") and native("TUPLE_REFINEMENT"))
+
+
+@pytest.mark.skipif(
+    not _stands_in(), reason="the compiler has every fix a patch stands in for"
+)
 def test_another_compiler_version_fails_closed():
     code = """
 import numba_cuda_mlir
@@ -159,8 +170,6 @@ def test_the_pins_match_the_installed_compiler():
     from cuda.coop.numba_mlir._pipeline import _ncm_patches, _typing_rules
 
     fixes = _ncm_fixes()
-    for patch in _ncm_patches.PATCHES:
-        _ncm_patches.check(patch)
     _ncm_patches.stand_in(fixes.TYPEINFER_HOOKS, _typing_rules.ENGINE)
     _ncm_patches.stand_in(fixes.TUPLE_REFINEMENT, _ncm_patches.TUPLE_REFINEMENT)
 
@@ -425,6 +434,87 @@ def test_a_plain_kernel_projecting_tuples_is_unchanged():
 
 
 # Phi of two ThreadData constructors (U-H1-3) --------------------------------
+
+_NO_PHI_REFINEMENT = """
+from numba_cuda_mlir.numba_cuda.core import typeinfer
+
+if hasattr(typeinfer.Propagate, "_refine_imprecise_phi_input"):
+    typeinfer.Propagate._refine_imprecise_phi_input = lambda self, ti: None
+"""
+
+_JOINED = """
+from numba_cuda_mlir import types
+from numba_cuda_mlir.numba_cuda.core.errors import TypingError
+
+from cuda import coop
+from cuda.coop.numba_mlir._pipeline import testing
+
+
+def joined(source, output, flag):
+    block = coop.this_block()
+    a = coop.ThreadData(4)
+    b = coop.ThreadData(4)
+    if flag[0]:
+        x = a
+    else:
+        x = b
+    coop.load(block, source, x)
+    coop.store(block, output, x)
+
+
+f32 = types.float32[::1]
+signature = types.void(f32, f32, types.int32[::1])
+try:
+    testing.compile_kernel(joined, signature, block=(128, 1, 1), chip="sm_120")
+    print("compiled")
+except TypingError as exc:
+    print(type(exc).__name__, exc)
+"""
+
+
+def test_the_phi_probe_agrees_with_the_compiler():
+    from numba_cuda_mlir.numba_cuda.core import typeinfer
+
+    fixes = _ncm_fixes()
+    assert fixes.present(fixes.PHI_REFINEMENT) == hasattr(
+        typeinfer.Propagate, "_refine_imprecise_phi_input"
+    )
+
+
+def test_the_phi_probe_fails_without_the_fix():
+    code = (
+        _NO_PHI_REFINEMENT
+        + """
+from cuda.coop.numba_mlir._pipeline import _ncm_fixes
+print("present", _ncm_fixes.present(_ncm_fixes.PHI_REFINEMENT))
+"""
+    )
+    result = run_python(code, None)
+    assert result.returncode == 0, result.stderr
+    assert "present False" in result.stdout
+
+
+def test_without_the_fix_a_phi_of_thread_data_names_it():
+    result = run_python(_NO_PHI_REFINEMENT + _JOINED, "typed")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("TypedPipelineError ")
+    assert (
+        "Joining ThreadData without dtype= into 'x' needs Numba-CUDA-MLIR's "
+        "phi refinement fix (NVIDIA/numba-cuda-mlir#395, "
+        "https://github.com/NVIDIA/numba-cuda-mlir/pull/395); the installed "
+        "Numba-CUDA-MLIR"
+    ) in result.stdout
+    assert "Pass dtype= to each ThreadData joined there." in result.stdout
+
+
+def test_a_phi_of_thread_data_compiles_exactly_with_the_fix():
+    result = run_python(_JOINED, "typed")
+    assert result.returncode == 0, result.stderr
+    fixes = _ncm_fixes()
+    if fixes.present(fixes.PHI_REFINEMENT):
+        assert result.stdout.startswith("compiled")
+    else:
+        assert "needs Numba-CUDA-MLIR's phi refinement fix" in result.stdout
 
 
 @requires_typed_pipeline

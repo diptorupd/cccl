@@ -20,7 +20,12 @@ from numba_cuda_mlir import cuda
 import cuda.coop as coop_common
 import cuda.coop.numba_mlir as coop_backend
 
-from .._support import ALGORITHMS, requires_typed_pipeline, run_python
+from .._support import (
+    ALGORITHMS,
+    requires_fix,
+    requires_typed_pipeline,
+    run_python,
+)
 
 pytestmark = requires_typed_pipeline
 
@@ -49,6 +54,7 @@ def test_k1_load_store_inferred(coop):
     np.testing.assert_array_equal(d_out.copy_to_host(), source)
 
 
+@requires_fix("PHI_REFINEMENT")
 @pytest.mark.parametrize("algorithm", ["direct", "transpose"])
 def test_two_constructors_joined_by_a_branch(algorithm):
     coop = coop_common

@@ -23,6 +23,7 @@ from .._support import (
     TYPED,
     f32_in_out,
     native,
+    requires_fix,
     requires_typed_pipeline,
 )
 
@@ -137,6 +138,7 @@ def test_a_load_through_a_tuple_alias_types_the_payload():
     )
 
 
+@requires_fix("PHI_REFINEMENT")
 def test_a_load_through_a_phi_types_both_constructors():
     @cuda.jit
     def joined(source, output, first):

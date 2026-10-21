@@ -31,9 +31,6 @@ patch: tuple refinement                U-H1-4: refine hooks for
                                        ``static_getitem`` and ``build_tuple``.
                                        Not applied with the compiler's own
                                        tuple refinement
-patch: phi refinement                  U-H1-3: refine every phi input; a
-                                       constructor's refine hook does not
-                                       raise
 patch: typing rules                    U-R1 to U-R3: a typing-rule bucket in
 (``_typing_rules.ENGINE``)             the registry; a gate before a call
                                        resolves; strata at the fixed point.
@@ -49,10 +46,11 @@ Rows marked "patch" change Numba-CUDA-MLIR's own behaviour. They live in
 ``_ncm_patches``, are pinned to Numba-CUDA-MLIR 0.5.4 and to the source of
 what they replace, and are applied only when the typed pipeline activates
 on a compiler that lacks the fix, which ``_ncm_fixes`` probes for; a
-mismatch fails closed in the same way. A fix with no patch, such as the
-argument-sized ``cuda.local.array`` of NVIDIA/numba-cuda-mlir#394, is
-needed only by the kernels that use it, which ``_missing_fixes`` refuses
-on a compiler without the fix.
+mismatch fails closed in the same way. A fix with no patch, the
+argument-sized ``cuda.local.array`` of NVIDIA/numba-cuda-mlir#394 or the
+phi refinement of NVIDIA/numba-cuda-mlir#395, is needed only by the
+kernels that use it, which ``_missing_fixes`` refuses on a compiler
+without the fix.
 """
 
 from __future__ import annotations
