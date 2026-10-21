@@ -36,7 +36,9 @@ patch: phi refinement                  U-H1-3: refine every phi input; a
                                        raise
 patch: typing rules                    U-R1 to U-R3: a typing-rule bucket in
 (``_typing_rules.ENGINE``)             the registry; a gate before a call
-                                       resolves; strata at the fixed point
+                                       resolves; strata at the fixed point.
+                                       Not applied with the type-inference
+                                       hooks of NVIDIA/numba-cuda-mlir#392
 =====================================  =======================================
 
 Importing this module fails with ``TypedPipelineUnavailableError`` when any
@@ -45,8 +47,9 @@ unsupported compiler fails closed instead of compiling kernels incorrectly.
 
 Rows marked "patch" change Numba-CUDA-MLIR's own behaviour. They live in
 ``_ncm_patches``, are pinned to Numba-CUDA-MLIR 0.5.4 and to the source of
-what they replace, and are applied only when the typed pipeline activates;
-a mismatch fails closed in the same way.
+what they replace, and are applied only when the typed pipeline activates
+on a compiler that lacks the fix, which ``_ncm_fixes`` probes for; a
+mismatch fails closed in the same way.
 """
 
 from __future__ import annotations

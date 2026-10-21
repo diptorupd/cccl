@@ -37,6 +37,10 @@ propagate again; else check. Each step either widens a type or releases a
 call that was never released before, so the loop ends. With no rule
 registered, type inference is the compiler's own.
 
+On a compiler with type-inference hooks (NVIDIA/numba-cuda-mlir#392) the
+rules run as one registered extension (``install``); on Numba-CUDA-MLIR
+0.5.4 the pinned ``ENGINE`` patch runs them the same way.
+
 For audit, ``RULES.describe()`` lists the registered rules, and inside
 ``with RULES.tracing() as events:`` each decision a rule makes is recorded
 as an ``Event``: a gate's call waits, opens or is released; a settle or
@@ -213,18 +217,14 @@ def _call_types(constraint, typevars, fnty) -> tuple | None:
     return (*pos_args, *kw_args.values(), fnty)
 
 
-def _gate(constraint, typeinfer_, typevars, fnty) -> bool:
-    """Whether a gate rule makes ``constraint`` wait."""
+def _gate(constraint, typeinfer_, seen: tuple) -> bool:
+    """Whether a gate rule makes ``constraint`` wait.
 
-    seen = _call_types(constraint, typevars, fnty)
-    if seen is None:
-        return False
-    arg_types = seen[:-1]
-    # As the compiler: wait for imprecise arguments other than arrays.
-    if not all(
-        a.is_precise() or isinstance(a, nb.types.Array) for a in arg_types
-    ):
-        return False
+    ``seen`` is the call's argument types, then the callee's type; the
+    compiler calls this only once the arguments are typed and precise.
+    """
+
+    arg_types, fnty = seen[:-1], seen[-1]
     rules = RULES.matching(GATE, seen)
     if not rules:
         return False
@@ -322,8 +322,18 @@ def _engine() -> tuple[tuple[type, str, Any], ...]:
     resolve = typeinfer.CallConstraint.resolve
 
     def resolve_with_gates(self, typeinfer_, typevars, fnty):
-        if RULES.has(GATE) and _gate(self, typeinfer_, typevars, fnty):
-            return None
+        if RULES.has(GATE):
+            seen = _call_types(self, typevars, fnty)
+            # As the compiler: wait for imprecise arguments other than arrays.
+            if (
+                seen is not None
+                and all(
+                    a.is_precise() or isinstance(a, nb.types.Array)
+                    for a in seen[:-1]
+                )
+                and _gate(self, typeinfer_, seen)
+            ):
+                return None
         return resolve(self, typeinfer_, typevars, fnty)
 
     def propagate_in_strata(self, raise_errors=True):
@@ -376,6 +386,62 @@ ENGINE = Patch(
 )
 
 
+def _extension():
+    """The typing rules as a Numba-CUDA-MLIR type-inference extension.
+
+    The compiler's ``defer_call`` hook asks the gate rules, and its
+    ``at_fixpoint`` hook runs the strata of the module docstring: settle,
+    release the waiting calls if nothing changed, and check at the final
+    fixed point. Scope: as ``ENGINE``.
+    """
+
+    class TypingRules(nb.extending.TypeInferExtension):
+        def defer_call(self, typeinfer_, constraint, fnty, args, kws, released):
+            if not RULES.has(GATE):
+                return False
+            return _gate(constraint, typeinfer_, (*args, *kws.values(), fnty))
+
+        def at_fixpoint(self, typeinfer_, final):
+            if not RULES:
+                return None
+            state = _state(typeinfer_)
+            if final:
+                return _run(CHECK, typeinfer_, _released_now(typeinfer_, state))
+            token = typeinfer_.get_state_token()
+            conflicts = _run(SETTLE, typeinfer_, tuple(state.waiting))
+            if conflicts or typeinfer_.get_state_token() != token:
+                return conflicts
+            for constraint, fn in state.waiting.items():
+                RULES.note(GATE, fn, constraint.loc, "released")
+                typeinfer_.release(constraint)
+            state.released.update(dict.fromkeys(state.waiting))
+            state.waiting.clear()
+            return None
+
+    return TypingRules()
+
+
+_installed: list = []
+
+
+def install() -> None:
+    """Run the typing rules on the compiler's type-inference hooks, once.
+
+    For a compiler with NVIDIA/numba-cuda-mlir#392; ``ENGINE`` stands in
+    for it on Numba-CUDA-MLIR 0.5.4.
+    """
+
+    if not _installed:
+        _installed.append(_extension())
+        nb.extending.register_typeinfer_extension(_installed[0])
+
+
+def installed() -> tuple:
+    """The extensions ``install`` registered."""
+
+    return tuple(_installed)
+
+
 __all__ = [
     "CHECK",
     "ENGINE",
@@ -386,6 +452,8 @@ __all__ = [
     "WAIT",
     "Event",
     "RuleSet",
+    "install",
+    "installed",
     "register",
     "writes",
 ]

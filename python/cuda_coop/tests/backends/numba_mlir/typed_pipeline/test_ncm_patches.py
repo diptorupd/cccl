@@ -47,30 +47,45 @@ print("changed", changed)
 """
 )
 
-PATCHED = [
-    "BuildTupleConstraint.__call__",
-    "BuildTupleConstraint.refine",
-    "CallConstraint.refine",
-    "CallConstraint.resolve",
-    "LocalArrayTemplate.generic",
-    "Propagate.__call__",
-    "StaticGetItemConstraint.__call__",
-    "StaticGetItemConstraint.refine",
-    "TypeInferer.propagate",
-]
+_EXTENSIONS = """
+from numba_cuda_mlir.numba_cuda.core import typeinfer
+
+extensions = getattr(typeinfer, "_registered_extensions", ())
+print("extensions", [type(e).__name__ for e in extensions])
+"""
+
+
+def patched() -> list[str]:
+    """What the typed pipeline replaces on the installed compiler."""
+
+    from cuda.coop.numba_mlir._pipeline import _ncm_fixes
+
+    names = [
+        "BuildTupleConstraint.__call__",
+        "BuildTupleConstraint.refine",
+        "CallConstraint.refine",
+        "LocalArrayTemplate.generic",
+        "Propagate.__call__",
+        "StaticGetItemConstraint.__call__",
+        "StaticGetItemConstraint.refine",
+    ]
+    if not _ncm_fixes.present(_ncm_fixes.TYPEINFER_HOOKS):
+        names += ["CallConstraint.resolve", "TypeInferer.propagate"]
+    return sorted(names)
 
 
 @pytest.mark.parametrize("pipeline", [None, "planner"])
 def test_the_default_pipeline_leaves_the_compiler_untouched(pipeline):
-    result = run_python(_REPORT, pipeline)
+    result = run_python(_REPORT + _EXTENSIONS, pipeline)
     assert result.returncode == 0, result.stderr
     assert "changed []" in result.stdout
+    assert "extensions []" in result.stdout
 
 
 def test_the_typed_pipeline_replaces_only_its_patch_targets():
     result = run_python(_REPORT, "typed")
     assert result.returncode == 0, result.stderr
-    assert f"changed {PATCHED}" in result.stdout
+    assert f"changed {patched()}" in result.stdout
 
 
 def test_a_changed_patch_target_fails_closed():
@@ -109,10 +124,10 @@ except ImportError as exc:
 """
     result = run_python(code, "typed")
     assert result.returncode == 0, result.stderr
+    assert "TypedPipelineUnavailableError " in result.stdout
     assert (
-        "TypedPipelineUnavailableError The cuda.coop typed pipeline's "
-        "'argument-sized cuda.local.array' patch was written against "
-        "Numba-CUDA-MLIR 0.5.4, but the installed compiler is 0.5.5."
+        "patch was written against Numba-CUDA-MLIR 0.5.4, but the installed "
+        "compiler is 0.5.5."
     ) in result.stdout
 
 
@@ -123,15 +138,55 @@ def test_apply_is_idempotent():
     replaced = _ncm_patches.replaced()
     _ncm_patches.apply()
     assert _ncm_patches.replaced() == replaced
-    assert sorted(f"{o.__name__}.{n}" for o, n in replaced) == PATCHED
+    assert sorted(f"{o.__name__}.{n}" for o, n in replaced) == patched()
 
 
 @pytest.mark.skipif(TYPED, reason="checks the pins without applying them")
 def test_the_pins_match_the_installed_compiler():
     from cuda.coop.numba_mlir._pipeline import _ncm_patches, _typing_rules
 
-    for patch in (*_ncm_patches.PATCHES, _typing_rules.ENGINE):
+    for patch in _ncm_patches.PATCHES:
         _ncm_patches.check(patch)
+    _ncm_patches.stand_in(_ncm_fixes().TYPEINFER_HOOKS, _typing_rules.ENGINE)
+
+
+def _ncm_fixes():
+    from cuda.coop.numba_mlir._pipeline import _ncm_fixes
+
+    return _ncm_fixes
+
+
+# Type-inference hooks (U-R1 to U-R3) ----------------------------------------
+
+
+def test_the_hooks_probe_agrees_with_the_compiler():
+    from numba_cuda_mlir import extending
+
+    fixes = _ncm_fixes()
+    assert fixes.present(fixes.TYPEINFER_HOOKS) == hasattr(
+        extending, "TypeInferExtension"
+    )
+
+
+def test_the_hooks_probe_fails_without_the_hooks():
+    code = """
+import numba_cuda_mlir.extending as extending
+if hasattr(extending, "register_typeinfer_extension"):
+    del extending.register_typeinfer_extension
+from cuda.coop.numba_mlir._pipeline import _ncm_fixes
+print("present", _ncm_fixes.present(_ncm_fixes.TYPEINFER_HOOKS))
+"""
+    result = run_python(code, None)
+    assert result.returncode == 0, result.stderr
+    assert "present False" in result.stdout
+
+
+def test_the_typed_pipeline_runs_the_rules_on_the_hooks_when_present():
+    result = run_python("import cuda.coop.numba_mlir" + _EXTENSIONS, "typed")
+    assert result.returncode == 0, result.stderr
+    fixes = _ncm_fixes()
+    expected = ["TypingRules"] if fixes.present(fixes.TYPEINFER_HOOKS) else []
+    assert f"extensions {expected}" in result.stdout
 
 
 # Argument-sized cuda.local.array (U-P-1) ------------------------------------

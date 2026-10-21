@@ -37,6 +37,7 @@ from typing import Any
 import numba_cuda_mlir
 
 from . import _bridges as nb
+from ._ncm_fixes import Fix, present
 
 NCM_VERSION = "0.5.4"
 
@@ -332,6 +333,26 @@ _ABSENT = object()
 _replaced: list[tuple[type, str, Any]] = []
 
 
+def stand_in(fix: Fix, patch: Patch) -> tuple[Patch, ...]:
+    """The patch to apply for ``fix``: none if the compiler has the fix.
+
+    Otherwise ``patch``, which must match the installed compiler; if it
+    does not, raise ``TypedPipelineUnavailableError`` naming the fix.
+    """
+
+    if present(fix):
+        return ()
+    try:
+        check(patch)
+    except nb.TypedPipelineUnavailableError as exc:
+        raise nb.TypedPipelineUnavailableError(
+            f"Numba-CUDA-MLIR {numba_cuda_mlir.__version__} does not have "
+            f"the {fix.name} fix ({fix.reference}), and the patch that "
+            f"stands in for it does not apply: {exc}"
+        ) from exc
+    return (patch,)
+
+
 def apply(*extra: Patch) -> None:
     """Check every patch, then apply them all; later calls do nothing.
 
@@ -369,4 +390,5 @@ __all__ = [
     "holds_thread_data",
     "replaced",
     "source_digest",
+    "stand_in",
 ]
