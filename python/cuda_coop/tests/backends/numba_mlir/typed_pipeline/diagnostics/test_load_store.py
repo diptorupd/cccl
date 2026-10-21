@@ -12,13 +12,20 @@ from __future__ import annotations
 
 import pytest
 from numba_cuda_mlir import cuda, types
+from numba_cuda_mlir.numba_cuda.core.errors import TypingError
 
 import cuda.coop.numba_mlir as qualified_coop
 from cuda import coop
 from cuda.coop.numba_mlir._pipeline import testing
 from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
 
-from .._support import BLOCK, CHIP, f32_in_out, requires_typed_pipeline
+from .._support import (
+    BLOCK,
+    CHIP,
+    f32_in_out,
+    native,
+    requires_typed_pipeline,
+)
 
 pytestmark = requires_typed_pipeline
 
@@ -143,6 +150,25 @@ def test_writes_that_disagree_without_coop_evidence():
         match=r"'items': its writes disagree on the dtype",
     ):
         _compile(kernel)
+
+
+def test_a_load_and_a_store_of_other_dtypes_through_a_tuple_alias():
+    def kernel(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(4)
+        alias = (items,)[0]
+        coop.load(block, source, alias)
+        coop.store(block, output, items)
+
+    if native("TUPLE_REFINEMENT"):
+        message = (
+            r"payload dtype float32 conflicts with destination dtype int32"
+        )
+    else:
+        message = r"tuple refinement fix \(NVIDIA/numba-cuda-mlir#396"
+    signature = types.void(types.float32[::1], types.int32[::1])
+    with pytest.raises(TypingError, match=message):
+        _compile(kernel, signature)
 
 
 def test_a_coop_call_in_a_separate_device_function():

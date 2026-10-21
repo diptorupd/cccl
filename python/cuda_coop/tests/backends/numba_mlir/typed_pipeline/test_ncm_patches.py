@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from numba_cuda_mlir.errors import UserFacingInternalCompilerError
+from numba_cuda_mlir.numba_cuda.core.errors import TypingError
 
 from ._support import TYPED, requires_fix, requires_typed_pipeline, run_python
 
@@ -416,6 +418,78 @@ def test_a_tuple_of_thread_data_compiles_exactly_with_the_fix():
         assert result.stdout.startswith("compiled")
     else:
         assert "needs Numba-CUDA-MLIR's tuple refinement fix" in result.stdout
+
+
+@requires_typed_pipeline
+@pytest.mark.xfail(
+    reason=(
+        "a phi of tuples built from different ThreadData refines neither "
+        "(diptorupd/numba-cuda-mlir#1)"
+    ),
+    raises=TypingError,
+    strict=True,
+)
+def test_a_load_through_a_phi_of_tuples_types_both_payloads():
+    from numba_cuda_mlir import types
+
+    from cuda import coop
+    from cuda.coop.numba_mlir._pipeline import testing
+
+    def joined(source, output, flag):
+        block = coop.this_block()
+        a = coop.ThreadData(4)
+        b = coop.ThreadData(4)
+        if flag[0]:
+            packed = (a,)
+        else:
+            packed = (b,)
+        items = packed[0]
+        coop.load(block, source, items)
+        coop.store(block, output, items)
+
+    f32 = types.float32[::1]
+    testing.compile_kernel(
+        joined,
+        types.void(f32, f32, types.int32[::1]),
+        block=(128, 1, 1),
+        chip="sm_120",
+    )
+
+
+@requires_typed_pipeline
+@requires_fix("TUPLE_REFINEMENT")
+@pytest.mark.xfail(
+    reason=(
+        "a tuple of a local array assigned in two places fails MLIR "
+        "verification at the slot store (diptorupd/numba-cuda-mlir#2)"
+    ),
+    raises=UserFacingInternalCompilerError,
+    strict=True,
+)
+def test_a_tuple_of_one_payload_assigned_in_two_places_lowers():
+    from numba_cuda_mlir import types
+
+    from cuda import coop
+    from cuda.coop.numba_mlir._pipeline import testing
+
+    def joined(source, output, flag):
+        block = coop.this_block()
+        a = coop.ThreadData(4)
+        if flag[0]:
+            packed = (a,)
+        else:
+            packed = (a,)
+        items = packed[0]
+        coop.load(block, source, items)
+        coop.store(block, output, a)
+
+    f32 = types.float32[::1]
+    testing.compile_kernel(
+        joined,
+        types.void(f32, f32, types.int32[::1]),
+        block=(128, 1, 1),
+        chip="sm_120",
+    )
 
 
 @requires_typed_pipeline
