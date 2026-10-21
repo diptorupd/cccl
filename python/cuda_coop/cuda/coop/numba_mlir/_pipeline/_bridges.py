@@ -4,7 +4,7 @@
 
 """Collect every Numba-CUDA-MLIR interface the typed pipeline uses.
 
-The typed pipeline runs on Numba-CUDA-MLIR ``>=0.5.0,<0.6`` without changes
+The typed pipeline runs on Numba-CUDA-MLIR ``>=0.5.0,<0.7`` without changes
 to the compiler. Some of what it needs is public (``numba_cuda_mlir.extending``
 and ``numba_cuda_mlir.models``); the rest is reached through the vendored
 ``numba_cuda_mlir.numba_cuda`` package or through behaviour that is not
@@ -98,7 +98,7 @@ try:
     from numba_cuda_mlir.tools import resolve_gpu_target
 except ImportError as exc:
     raise TypedPipelineUnavailableError(
-        "The cuda.coop typed pipeline needs Numba-CUDA-MLIR >=0.5.0,<0.6; "
+        "The cuda.coop typed pipeline needs Numba-CUDA-MLIR >=0.5.0,<0.7; "
         f"the installed compiler is missing {exc.name or exc}."
     ) from exc
 
