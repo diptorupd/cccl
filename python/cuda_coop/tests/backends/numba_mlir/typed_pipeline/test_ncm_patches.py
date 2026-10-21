@@ -61,14 +61,17 @@ def patched() -> list[str]:
     from cuda.coop.numba_mlir._pipeline import _ncm_fixes
 
     names = [
-        "BuildTupleConstraint.__call__",
-        "BuildTupleConstraint.refine",
         "CallConstraint.refine",
         "LocalArrayTemplate.generic",
         "Propagate.__call__",
-        "StaticGetItemConstraint.__call__",
-        "StaticGetItemConstraint.refine",
     ]
+    if not _ncm_fixes.present(_ncm_fixes.TUPLE_REFINEMENT):
+        names += [
+            "BuildTupleConstraint.__call__",
+            "BuildTupleConstraint.refine",
+            "StaticGetItemConstraint.__call__",
+            "StaticGetItemConstraint.refine",
+        ]
     if not _ncm_fixes.present(_ncm_fixes.TYPEINFER_HOOKS):
         names += ["CallConstraint.resolve", "TypeInferer.propagate"]
     return sorted(names)
@@ -145,9 +148,11 @@ def test_apply_is_idempotent():
 def test_the_pins_match_the_installed_compiler():
     from cuda.coop.numba_mlir._pipeline import _ncm_patches, _typing_rules
 
+    fixes = _ncm_fixes()
     for patch in _ncm_patches.PATCHES:
         _ncm_patches.check(patch)
-    _ncm_patches.stand_in(_ncm_fixes().TYPEINFER_HOOKS, _typing_rules.ENGINE)
+    _ncm_patches.stand_in(fixes.TYPEINFER_HOOKS, _typing_rules.ENGINE)
+    _ncm_patches.stand_in(fixes.TUPLE_REFINEMENT, _ncm_patches.TUPLE_REFINEMENT)
 
 
 def _ncm_fixes():
@@ -244,6 +249,60 @@ def test_a_tuple_local_array_shape_from_an_argument_is_still_refused():
 
 
 # Payload through a tuple alias (U-H1-4) -------------------------------------
+
+_NO_NATIVE_TUPLE_REFINEMENT = """
+from numba_cuda_mlir.numba_cuda.core import typeinfer
+
+getitem = typeinfer.StaticGetItemConstraint
+if hasattr(getitem, "_refine_tuple_item"):
+    getitem._refine_tuple_item = lambda self, typeinfer_, tupty: None
+"""
+
+
+def test_the_tuple_probe_agrees_with_the_compiler():
+    from numba_cuda_mlir.numba_cuda.core import typeinfer
+
+    fixes = _ncm_fixes()
+    assert fixes.present(fixes.TUPLE_REFINEMENT) == hasattr(
+        typeinfer.StaticGetItemConstraint, "_refine_tuple_item"
+    )
+
+
+def test_the_tuple_probe_fails_without_tuple_refinement():
+    code = (
+        _NO_NATIVE_TUPLE_REFINEMENT
+        + """
+from cuda.coop.numba_mlir._pipeline import _ncm_fixes
+print("present", _ncm_fixes.present(_ncm_fixes.TUPLE_REFINEMENT))
+"""
+    )
+    result = run_python(code, None)
+    assert result.returncode == 0, result.stderr
+    assert "present False" in result.stdout
+
+
+def test_without_tuple_refinement_a_patch_that_does_not_apply_fails_closed():
+    code = (
+        _NO_NATIVE_TUPLE_REFINEMENT
+        + """
+call = getitem.__call__
+getitem.__call__ = lambda self, typeinfer_: call(self, typeinfer_)
+try:
+    import cuda.coop.numba_mlir._pipeline as pipeline
+    pipeline._activate()
+except ImportError as exc:
+    print(type(exc).__name__, exc)
+"""
+    )
+    result = run_python(code, "typed")
+    assert result.returncode == 0, result.stderr
+    assert (
+        "does not have the tuple refinement fix (U-H1-4, upstream fix in "
+        "progress), and the patch that stands in for it does not apply: The "
+        "cuda.coop typed pipeline's 'tuple refinement' patch was written "
+        "against Numba-CUDA-MLIR 0.5.4, but"
+    ) in result.stdout
+    assert result.stdout.startswith("TypedPipelineUnavailableError ")
 
 
 def test_tuple_refinement_is_scoped_to_thread_data():

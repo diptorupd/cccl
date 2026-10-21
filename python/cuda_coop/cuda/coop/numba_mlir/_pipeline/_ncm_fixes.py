@@ -181,7 +181,33 @@ TYPEINFER_HOOKS = Fix(
 )
 
 
+# Tuple refinement (U-H1-4) ---------------------------------------------------
+
+
+def _unpacked(make):
+    pair = (make(), 1)
+    x, _n = pair
+    x[0] = 1.0
+
+
+def _has_tuple_refinement() -> bool:
+    """A write through a value unpacked from a tuple refines the tuple and
+    the value it was built from."""
+
+    inferer, errors = infer(_unpacked, _undefined_array())
+    return not errors and all_precise(inferer)
+
+
+TUPLE_REFINEMENT = Fix(
+    name="tuple refinement",
+    ask="U-H1-4",
+    pull=None,
+    probe=_has_tuple_refinement,
+)
+
+
 __all__ = [
+    "TUPLE_REFINEMENT",
     "TYPEINFER_HOOKS",
     "Fix",
     "all_precise",

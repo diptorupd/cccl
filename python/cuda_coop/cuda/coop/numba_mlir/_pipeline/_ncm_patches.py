@@ -190,6 +190,9 @@ def _tuple_refinement() -> tuple[tuple[type, str, Any], ...]:
 
     Scope: cooperative types only. A constraint takes part only when the
     tuple holds a ``ThreadDataType``, and refines only items that do.
+
+    Applied only on a compiler without tuple refinement of its own
+    (``_ncm_fixes.TUPLE_REFINEMENT``).
     """
 
     static_getitem = typeinfer.StaticGetItemConstraint.__call__
@@ -327,7 +330,7 @@ JOIN_REFINEMENT = Patch(
     build=_join_refinement,
 )
 
-PATCHES = (LOCAL_ARRAY_SHAPE, TUPLE_REFINEMENT, JOIN_REFINEMENT)
+PATCHES = (LOCAL_ARRAY_SHAPE, JOIN_REFINEMENT)
 
 _ABSENT = object()
 _replaced: list[tuple[type, str, Any]] = []

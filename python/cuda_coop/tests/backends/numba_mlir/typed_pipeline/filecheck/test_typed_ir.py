@@ -11,12 +11,20 @@ pass inserted.
 
 from __future__ import annotations
 
+import pytest
 from numba_cuda_mlir import cuda, types
 
 from cuda import coop
 from cuda.coop.numba_mlir._pipeline import testing
 
-from .._support import BLOCK, CHIP, f32_in_out, requires_typed_pipeline
+from .._support import (
+    BLOCK,
+    CHIP,
+    TYPED,
+    f32_in_out,
+    native,
+    requires_typed_pipeline,
+)
 
 pytestmark = requires_typed_pipeline
 
@@ -90,6 +98,15 @@ def test_store_destination_types_a_payload_without_a_load():
     )
 
 
+@pytest.mark.xfail(
+    TYPED and native("TUPLE_REFINEMENT"),
+    reason=(
+        "the compiler's own tuple refinement refines only imprecise items, "
+        "so items keeps the store's evidence while the alias takes the "
+        "load's; coop's patch refined both (U-H1-4)"
+    ),
+    strict=True,
+)
 def test_a_load_through_a_tuple_alias_types_the_payload():
     @cuda.jit
     def packed(source, output):

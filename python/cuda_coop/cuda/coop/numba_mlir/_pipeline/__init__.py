@@ -55,7 +55,12 @@ def _activate() -> None:
     )
 
     hooks = _ncm_fixes.TYPEINFER_HOOKS
-    _ncm_patches.apply(*_ncm_patches.stand_in(hooks, _typing_rules.ENGINE))
+    _ncm_patches.apply(
+        *_ncm_patches.stand_in(hooks, _typing_rules.ENGINE),
+        *_ncm_patches.stand_in(
+            _ncm_fixes.TUPLE_REFINEMENT, _ncm_patches.TUPLE_REFINEMENT
+        ),
+    )
     if _ncm_fixes.present(hooks):
         _typing_rules.install()
     _payload_rules.register()

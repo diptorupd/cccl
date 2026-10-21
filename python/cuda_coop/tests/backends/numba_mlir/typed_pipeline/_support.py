@@ -28,6 +28,15 @@ requires_typed_pipeline = pytest.mark.skipif(
     not TYPED, reason="needs CUDA_COOP_NUMBA_MLIR_PIPELINE=typed"
 )
 
+
+def native(name: str) -> bool:
+    """Whether the installed compiler has the ``_ncm_fixes`` fix ``name``."""
+
+    from cuda.coop.numba_mlir._pipeline import _ncm_fixes
+
+    return _ncm_fixes.present(getattr(_ncm_fixes, name))
+
+
 # Compile-only tests pin the target and stand in for the launch's block.
 CHIP = "sm_120"
 BLOCK = (128, 1, 1)
