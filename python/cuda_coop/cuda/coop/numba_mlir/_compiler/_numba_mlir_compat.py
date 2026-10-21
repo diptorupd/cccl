@@ -74,7 +74,7 @@ from __future__ import annotations
 import importlib.metadata
 from types import ModuleType
 
-_REQUIRED_RUNTIME_VERSION = ">=0.5.0,<0.6"
+_REQUIRED_RUNTIME_VERSION = ">=0.5.0,<0.7"
 _RUNTIME_INSTALL_HINT = (
     "python -m pip install --upgrade 'cuda-coop[numba-cuda-mlir-cu12]' "
     "for CUDA 12 or 'cuda-coop[numba-cuda-mlir-cu13]' for CUDA 13"

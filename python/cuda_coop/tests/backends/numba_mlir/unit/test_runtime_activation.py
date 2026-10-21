@@ -250,7 +250,7 @@ def test_failed_planner_import_can_retry_without_partial_registration(
     ],
 )
 @pytest.mark.parametrize(
-    "version", ["0.4.9", "0.5.0rc1", "0.6.0rc1", "0.6.0", "invalid", None]
+    "version", ["0.4.9", "0.5.0rc1", "0.7.0rc1", "0.7.0", "invalid", None]
 )
 def test_backend_registration_rejects_unsupported_runtime_version(
     activate, version
@@ -281,9 +281,9 @@ def test_backend_registration_rejects_unsupported_runtime_version(
             assert exc.backend == "numba-cuda-mlir"
             assert exc.reason_code == "unsupported-runtime-version"
             assert exc.details["detected_version"] == VERSION
-            assert exc.details["required_version"] == ">=0.5.0,<0.6"
+            assert exc.details["required_version"] == ">=0.5.0,<0.7"
             message = str(exc)
-            assert "numba-cuda-mlir>=0.5.0,<0.6" in message
+            assert "numba-cuda-mlir>=0.5.0,<0.7" in message
             assert "cuda-coop[numba-cuda-mlir-cu12]" in message
             assert "cuda-coop[numba-cuda-mlir-cu13]" in message
             if VERSION is not None:
@@ -299,7 +299,9 @@ def test_backend_registration_rejects_unsupported_runtime_version(
     )
 
 
-@pytest.mark.parametrize("version", ["0.5.0+local", "0.5.1rc1", None])
+@pytest.mark.parametrize(
+    "version", ["0.5.0+local", "0.5.1rc1", "0.6.0rc1", "0.6.0+local", None]
+)
 def test_backend_registration_accepts_supported_runtime_version(version):
     _run_import_probe(
         f"""
@@ -372,7 +374,7 @@ def test_root_import_warns_when_an_old_runtime_was_already_imported():
         assert len(caught) == 1, caught
         assert caught[0].category is CudaCoopAutoRegistrationWarning
         assert "0.4.9" in str(caught[0].message)
-        assert "numba-cuda-mlir>=0.5.0,<0.6" in str(caught[0].message)
+        assert "numba-cuda-mlir>=0.5.0,<0.7" in str(caught[0].message)
         assert "cuda.coop.numba_mlir" not in sys.modules
         assert "numba_cuda_mlir.cuda" not in sys.modules
         """

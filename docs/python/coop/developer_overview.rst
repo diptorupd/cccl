@@ -1084,7 +1084,7 @@ step. There is one compiler hook to register, so activation needs no
 registry snapshots or rollback. ``_compiler/_numba_mlir_compat.py`` checks
 the installed compiler version when the Numba backend is activated, before
 importing its compiler integration. The Numba extras declare
-``numba-cuda-mlir>=0.5.0,<0.6`` for package installers; the activation check
+``numba-cuda-mlir>=0.5.0,<0.7`` for package installers; the activation check
 also covers applications that install bare ``cuda-coop`` and manage compiler
 dependencies separately. An unused Numba installation has no effect on other
 backends. Once the version check succeeds, integration modules import the
