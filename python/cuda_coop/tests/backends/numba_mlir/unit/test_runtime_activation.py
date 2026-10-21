@@ -66,12 +66,18 @@ def test_numba_first_root_import_does_not_require_refresh_registries():
 
         import numba_cuda_mlir
         import numba_cuda_mlir.extending as extending
+        from packaging.specifiers import SpecifierSet
 
         del extending.refresh_registries
         import cuda.coop  # noqa: F401
+        from cuda.coop.numba_mlir._compiler._numba_mlir_compat import (
+            _REQUIRED_RUNTIME_VERSION,
+        )
 
         assert "cuda.coop.numba_mlir" in sys.modules
-        assert numba_cuda_mlir.__version__.startswith("0.5.")
+        assert SpecifierSet(_REQUIRED_RUNTIME_VERSION).contains(
+            numba_cuda_mlir.__version__, prereleases=True
+        )
         """
     )
 
