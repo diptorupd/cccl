@@ -9,8 +9,8 @@ provider symbol and ABI, the scratch operand, the barrier, the link items)
 was decided by call resolution and stored in
 ``state.metadata["coop_plan"]``:
 
-* a group (``this_block()``, ``this_warp()``, ``group_by()``) is a
-  placeholder ``i8`` constant;
+* a group (``this_block()``, ``this_warp()``, ``group_by()`` and the other
+  ``this_*()`` factories) is a placeholder ``i8`` constant;
 * ``ThreadData(...)`` is a ``memref.alloca`` of its type's extent, aligned as
   the constructor's own ``alignment=`` asks, and its ``items_per_thread``
   is that extent as a constant;

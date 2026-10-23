@@ -58,6 +58,7 @@ from ._errors import (
     PayloadMemoryDtypeError,
     RewriteArgumentError,
     TypedPipelineError,
+    TypedPipelineNotImplementedError,
     TypedPipelineTypeError,
     TypedPipelineValueError,
     planner_text,
@@ -197,9 +198,14 @@ def _payload_dtype(ty: Any) -> Any:
 _PYTHON_DTYPES = (bool, int, float, complex)
 
 
-# this_block and this_warp ----------------------------------------------------
+# Groups --------------------------------------------------------------------
 
-GROUP_FACTORIES = frozenset({"this_block", "this_warp"})
+# The group factories a kernel may call. A load or store refuses a thread,
+# cluster or grid group at the call, as coop's planner does.
+GROUP_FACTORIES = frozenset(
+    {"this_block", "this_warp", "this_thread", "this_cluster", "this_grid"}
+)
+_NON_BLOCK_CONSTRUCTOR_KINDS = frozenset({"thread", "cluster", "grid"})
 
 
 def _bind(function: Callable, args, kws) -> dict:
@@ -215,7 +221,7 @@ def _bind(function: Callable, args, kws) -> dict:
     return bound.arguments
 
 
-def _this_group(function: Callable, qualified_name: str) -> Callable:
+def _this_group(function: Callable) -> Callable:
     def generic(self, args, kws):
         _bind(function, args, kws)
         return nb.signature(CoopGroupType(function()))
@@ -538,13 +544,28 @@ def _algorithm(kind: str, ty: Any, qualified: bool) -> str:
     return GroupLoadStoreAlgorithm(token).value
 
 
-def _check_group(kind: str, group: Any) -> None:
+def _check_group(kind: str, group: Any, qualified: bool) -> None:
+    """Refuse a group operand the API does not take.
+
+    The common API refuses a thread, cluster or grid group as coop's
+    common-API check does. Coop's shared planner refuses the qualified API's,
+    and any block or warp group it cannot lower, when the call is
+    specialized.
+    """
+
+    from ..._core.api._dispatch import _validate_common_operation_group
     from .._compiler import _group_errors as planner
 
     if not isinstance(group, CoopGroupType):
         raise NonConstantThreadGroupError(
             planner_text(planner.NonConstantThreadGroupError(kind))
         )
+    if qualified or group.kind not in _NON_BLOCK_CONSTRUCTOR_KINDS:
+        return
+    try:
+        _validate_common_operation_group(kind, group.group)
+    except NotImplementedError as exc:
+        raise TypedPipelineNotImplementedError(planner_text(exc)) from None
 
 
 def _check_payload(kind: str, payload: Any, qualified: bool) -> None:
@@ -610,7 +631,7 @@ def _request(
     group = bound.get("group")
     if isinstance(group, RefusedGroupType):
         return _REFUSED_GROUP
-    _check_group(kind, group)
+    _check_group(kind, group, qualified)
     memory = bound.get(_MEMORY[kind])
     payload = bound.get(_PAYLOAD[kind])
     if kind == "store" and is_scalar_value(payload):
@@ -810,8 +831,9 @@ _registered = False
 def register() -> None:
     """Register a template for every kernel-callable public object.
 
-    ``this_block``, ``this_warp``, ``ThreadData``, ``load`` and ``store`` of
-    both APIs are typed; every other primitive is rejected.
+    The group factories in ``GROUP_FACTORIES``, ``ThreadData``, ``load``
+    and ``store`` of both APIs are typed; every other primitive is
+    rejected.
     """
 
     global _registered
@@ -822,7 +844,7 @@ def register() -> None:
         name = qualified_name.replace(".", "_")
         operation = group_operation(obj)
         if short in GROUP_FACTORIES:
-            register_template(obj, _this_group(obj, qualified_name), name)
+            register_template(obj, _this_group(obj), name)
         elif short == "ThreadData":
             register_template(
                 obj,

@@ -281,3 +281,56 @@ def test_a_refusal_has_the_planner_class(
             chip=CHIP,
         )
     assert isinstance(info.value, TypedPipelineError)
+
+
+_OTHER_GROUPS = ["this_thread", "this_cluster", "this_grid"]
+_APIS = {"common": coop, "qualified": qualified_coop}
+
+
+@pytest.mark.parametrize("constructor", _OTHER_GROUPS)
+@pytest.mark.parametrize("api", _APIS)
+def test_a_kernel_may_construct_a_group_load_and_store_refuse(api, constructor):
+    make_group = getattr(_APIS[api], constructor)
+
+    def unused(source, output):
+        make_group()
+        output[0] = source[0]
+
+    testing.compile_kernel(unused, types.void(f32, f32), block=BLOCK, chip=CHIP)
+
+
+_COMMON_GROUP_REFUSAL = (
+    r"cuda\.coop\.load does not support group kind '{kind}' in the common API"
+)
+_QUALIFIED_GROUP_REFUSAL = (
+    r"cuda\.coop\.numba_mlir\.load cannot lower this group: cuda\.coop "
+    r"Load/Store supports this_block\(\)"
+)
+
+
+@pytest.mark.parametrize("constructor", _OTHER_GROUPS)
+@pytest.mark.parametrize(
+    "api, planner_class, message",
+    [
+        ("common", NotImplementedError, _COMMON_GROUP_REFUSAL),
+        ("qualified", UnsupportedLoadStoreGroupError, _QUALIFIED_GROUP_REFUSAL),
+    ],
+    ids=["common", "qualified"],
+)
+def test_a_load_on_a_group_other_than_the_block(
+    api, planner_class, message, constructor
+):
+    module = _APIS[api]
+    make_group = getattr(module, constructor)
+
+    def kernel(source, output):
+        items = module.ThreadData(4)
+        module.load(make_group(), source, items)
+        module.store(module.this_block(), output, items)
+
+    kind = constructor.removeprefix("this_")
+    with pytest.raises(planner_class, match=message.format(kind=kind)) as info:
+        testing.compile_kernel(
+            kernel, types.void(f32, f32), block=BLOCK, chip=CHIP
+        )
+    assert isinstance(info.value, TypedPipelineError)

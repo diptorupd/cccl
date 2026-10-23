@@ -18,13 +18,8 @@ pytestmark = requires_typed_pipeline
 
 # Primitives outside the typed pipeline's first supported surface.
 _REJECTED = [
-    ("cuda.coop", "this_cluster"),
-    ("cuda.coop", "this_thread"),
     ("cuda.coop", "TempStorage"),
-    ("cuda.coop.numba_mlir", "this_cluster"),
-    ("cuda.coop.numba_mlir", "this_thread"),
     ("cuda.coop.numba_mlir", "TempStorage"),
-    ("cuda.coop.numba_mlir", "this_grid"),
 ]
 
 
