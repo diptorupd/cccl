@@ -14,8 +14,10 @@ alignment, and lays scratch out as coop's planner does:
   bytes; each site of an ``"exclusive"`` one gets its own slice. An omitted
   ``size_in_bytes`` is the sites' requirement; an explicit one must cover
   it;
-* then one implicit region for the sites without ``temp_storage=``, sized
-  to their largest need;
+* then one implicit region for the sites without ``temp_storage=``. Its
+  sites on the same group topology share a domain: the block's sites share
+  one slot of their largest need, and the sites on a warp group one aligned
+  slot per warp of the block (``(rank // width) * stride``);
 * all regions in one ``cuda.shared.array`` backing. Up to the device's
   static limit it is a static array; above it, the backing is the launch's
   dynamic shared memory, up to the device's opt-in limit.
@@ -58,13 +60,17 @@ _BACKING_ALIGNMENT = 16
 class Slice:
     """A site's scratch: ``size`` bytes at ``offset`` in the backing.
 
-    ``region_offset`` is the same offset from the start of ``region``.
+    ``region_offset`` is the same offset from the start of ``region``. A
+    site on a group with several instances in the block has ``stride``
+    bytes per instance: instance ``i`` uses the bytes at ``offset + i *
+    stride``.
     """
 
     region: str
     offset: int
     size: int
     region_offset: int = 0
+    stride: int = 0
 
 
 @dataclass(frozen=True)
@@ -176,6 +182,44 @@ def _explicit_region(
     return size, alignment, offsets
 
 
+def _implicit_region(
+    needs: list[tuple[int, int]], groups: list[tuple | None]
+) -> tuple[int, int, list[int], list[int]]:
+    """Size the implicit region; return it with each use's offset and stride.
+
+    As in coop's planner, uses on the same group topology share one domain,
+    the block's group or a ``(kind, width, instances)`` group. A domain
+    holds one slot per group instance, each the domain's largest need,
+    aligned; the domains follow each other in first-use order.
+    """
+
+    from .._compiler._rewrite_support import _MIN_TEMP_STORAGE_ALIGNMENT
+
+    domains: dict[tuple | None, list[int]] = {}
+    for index, group in enumerate(groups):
+        domains.setdefault(group, []).append(index)
+    size, alignment = 0, 1
+    offsets, strides = [0] * len(needs), [0] * len(needs)
+    for group, indexes in domains.items():
+        domain_needs = [needs[i] for i in indexes]
+        largest = max(s for s, _ in domain_needs)
+        domain_alignment = max(a for _, a in domain_needs)
+        instances = 1
+        if group is not None:
+            instances = group[2]
+            domain_alignment = max(
+                _MIN_TEMP_STORAGE_ALIGNMENT, domain_alignment
+            )
+        stride = _align_up(largest, domain_alignment)
+        size = _align_up(size, domain_alignment)
+        for i in indexes:
+            offsets[i] = size
+            strides[i] = stride if instances > 1 else 0
+        size += largest if instances == 1 else stride * instances
+        alignment = max(alignment, domain_alignment)
+    return size, alignment, offsets, strides
+
+
 def _alias_error(backing: Backing, conflicts: Sequence[UserSharedArray]):
     where = ", ".join(
         f"{'static' if array.static else 'dynamic/runtime-sized'} "
@@ -199,6 +243,7 @@ def layout(
     storage: Sequence[Any] | None = None,
     user_shared: Sequence[UserSharedArray] = (),
     limits: Callable[[int], tuple[int, int]] = device_limits,
+    groups: Sequence[tuple | None] | None = None,
 ) -> StorageLayout:
     """Lay out the sites' scratch ``needs``, one ``(size, alignment)`` each.
 
@@ -206,11 +251,15 @@ def layout(
     ``TempStorage`` descriptor, or ``None`` for implicit scratch (the
     default for every site). ``user_shared`` describes the kernel's own
     ``cuda.shared.array`` calls; ``limits`` returns the device's default and
-    opt-in shared memory for a backing of the given size.
+    opt-in shared memory for a backing of the given size. ``groups`` holds
+    each site's ``(kind, width, instances)`` group when it is not the block
+    (the default for every site).
     """
 
     if storage is None:
         storage = [None] * len(needs)
+    if groups is None:
+        groups = [None] * len(needs)
     slices: list[Slice | None] = [None] * len(needs)
     uses: dict[Any, list[int]] = {}
     for index, (need, descriptor) in enumerate(
@@ -228,18 +277,21 @@ def layout(
         if not indexes:
             continue
         site_needs = [needs[i] for i in indexes]
+        strides = [0] * len(indexes)
         if descriptor is None:
             name = IMPLICIT_REGION
-            size = max(s for s, _ in site_needs)
-            alignment = max(a for _, a in site_needs)
-            offsets = [0] * len(indexes)
+            size, alignment, offsets, strides = _implicit_region(
+                site_needs, [groups[i] for i in indexes]
+            )
         else:
             name = f"explicit.{len(regions)}"
             size, alignment, offsets = _explicit_region(descriptor, site_needs)
         offset = _align_up(offset, alignment)
         regions.append(Region(name, offset, size, alignment))
-        for i, at, (need_size, _) in zip(indexes, offsets, site_needs):
-            slices[i] = Slice(name, offset + at, need_size, at)
+        for i, at, stride, (need_size, _) in zip(
+            indexes, offsets, strides, site_needs
+        ):
+            slices[i] = Slice(name, offset + at, need_size, at, stride)
         offset += size
         max_alignment = max(max_alignment, alignment)
 
@@ -328,7 +380,18 @@ def analyze(
             )
         needs.append(need)
     storage = [site.storage for site in sites.sites]
-    return layout(needs, storage, sites.user_shared), bundle
+    threads = specialization.block[0] * specialization.block[1]
+    threads *= specialization.block[2]
+    groups = [
+        None
+        if tile is None
+        else (site.request.group.kind, tile.width, threads // tile.width)
+        for site, tile in zip(sites.sites, specialization.tiles, strict=True)
+    ]
+    return (
+        layout(needs, storage, sites.user_shared, groups=groups),
+        bundle,
+    )
 
 
 __all__ = [

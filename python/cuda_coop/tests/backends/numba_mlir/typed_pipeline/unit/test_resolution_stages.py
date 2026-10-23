@@ -94,6 +94,49 @@ def test_no_scratch_needs_no_backing():
     assert layout.scratch == (False, False)
 
 
+EIGHTS = ("threads_within_warp", 8, 8)
+WARPS = ("warp", 32, 2)
+
+
+def test_a_warp_group_gets_an_aligned_slot_per_instance():
+    layout = _storage.layout([(132, 4)], groups=[EIGHTS])
+    assert layout.regions == (Region("implicit.0", 0, 8 * 136, 8),)
+    assert layout.slices[0] == _storage.Slice("implicit.0", 0, 132, 0, 136)
+
+
+def test_group_domains_follow_each_other_in_first_use_order():
+    layout = _storage.layout(
+        [(1024, 16), (132, 4), (516, 4), (100, 4), (64, 8)],
+        groups=[None, EIGHTS, WARPS, EIGHTS, None],
+    )
+    assert layout.regions == (Region("implicit.0", 0, 2112 + 2 * 520, 16),)
+    assert [(s.region_offset, s.stride) for s in layout.slices] == [
+        (0, 0),
+        (1024, 136),
+        (2112, 520),
+        (1024, 136),
+        (0, 0),
+    ]
+
+
+def test_a_group_with_one_instance_takes_no_stride():
+    layout = _storage.layout([(100, 4)], groups=[("warp", 32, 1)])
+    assert layout.regions == (Region("implicit.0", 0, 100, 8),)
+    assert layout.slices[0].stride == 0
+
+
+def test_explicit_storage_keeps_its_layout_next_to_a_warp_domain():
+    storage = _storage_descriptor()
+    layout = _storage.layout(
+        [(64, 16), (132, 4)], [storage, None], groups=[None, EIGHTS]
+    )
+    assert layout.regions == (
+        Region("explicit.0", 0, 64, 16),
+        Region("implicit.0", 64, 8 * 136, 8),
+    )
+    assert layout.slices[1].offset == 64
+
+
 def _user(size, static=True, line=3):
     return UserSharedArray(static, size, nb.ir.Loc("kernel.py", line))
 
