@@ -47,7 +47,7 @@ def _warp(width=None, *, exhaustive=True):
     return CoopGroupType(group)
 
 
-def _request(group, algorithm="direct", kind="load"):
+def _request(group, algorithm="direct", kind="load", *, qualified=False):
     return _templates.request_for(
         kind,
         [
@@ -56,6 +56,7 @@ def _request(group, algorithm="direct", kind="load"):
             ThreadDataType(types.float32, 4, PRODUCER),
         ],
         {"algorithm": literal(algorithm)},
+        qualified=qualified,
     )
 
 
@@ -300,10 +301,12 @@ def test_coop_planning_refuses_a_warp_group_in_a_partial_warp_block(width):
 
 def test_coop_planning_refuses_a_partition_load_store_does_not_support():
     block_of_warps = CoopGroupType(coop.this_block().group_by(2))
+    with pytest.raises(NotImplementedError, match="in the common API"):
+        _request(block_of_warps)
     with pytest.raises(
         UnsupportedLoadStoreGroupError, match="supports this_block"
     ):
-        _specialize._complete(_request(block_of_warps), BLOCK)
+        _specialize._complete(_request(block_of_warps, qualified=True), BLOCK)
     with pytest.raises(
         UnsupportedLoadStoreGroupError, match="power-of-two group width"
     ):

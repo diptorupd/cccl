@@ -208,7 +208,6 @@ _PYTHON_DTYPES = (bool, int, float, complex)
 GROUP_FACTORIES = frozenset(
     {"this_block", "this_warp", "this_thread", "this_cluster", "this_grid"}
 )
-_NON_BLOCK_CONSTRUCTOR_KINDS = frozenset({"thread", "cluster", "grid"})
 
 
 def _bind(function: Callable, args, kws) -> dict:
@@ -610,10 +609,10 @@ def _algorithm(kind: str, ty: Any, qualified: bool) -> str:
 def _check_group(kind: str, group: Any, qualified: bool) -> None:
     """Refuse a group operand the API does not take.
 
-    The common API refuses a thread, cluster or grid group as coop's
-    common-API check does. Coop's shared planner refuses the qualified API's,
-    and any block or warp group it cannot lower, when the call is
-    specialized.
+    The common API refuses a group kind outside its contract, such as a
+    thread group or warps within a block, as coop's common-API check does.
+    Coop's shared planner refuses the qualified API's, and any block or warp
+    group it cannot lower, when the call is specialized.
     """
 
     from ..._core.api._dispatch import _validate_common_operation_group
@@ -623,7 +622,7 @@ def _check_group(kind: str, group: Any, qualified: bool) -> None:
         raise NonConstantThreadGroupError(
             planner_text(planner.NonConstantThreadGroupError(kind))
         )
-    if qualified or group.kind not in _NON_BLOCK_CONSTRUCTOR_KINDS:
+    if qualified:
         return
     try:
         _validate_common_operation_group(kind, group.group)

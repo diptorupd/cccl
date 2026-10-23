@@ -120,6 +120,21 @@ def test_a_block_partition_is_not_a_load_store_group():
         coop.load(group, source, items)
         coop.store(coop.this_block(), output, items)
 
+    with _raises(
+        NotImplementedError,
+        r"cuda\.coop\.load does not support group kind .* in the common API",
+    ) as info:
+        _compile(kernel)
+    _check_class(info, NotImplementedError)
+
+
+def test_a_block_partition_is_not_a_qualified_load_store_group():
+    def kernel(source, output):
+        group = qualified_coop.this_block().group_by(2)
+        items = qualified_coop.ThreadData(4)
+        qualified_coop.load(group, source, items)
+        qualified_coop.store(qualified_coop.this_block(), output, items)
+
     with _raises(UnsupportedLoadStoreGroupError, "supports this_block") as info:
         _compile(kernel)
     _check_class(info, UnsupportedLoadStoreGroupError)
