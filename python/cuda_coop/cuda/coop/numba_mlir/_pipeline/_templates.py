@@ -253,6 +253,21 @@ def constructor_alignment(qualified_name: str, ty: Any) -> int | None:
 
 def _thread_data(function: Callable, qualified_name: str) -> Callable:
     def generic(self, args, kws):
+        # Numba-CUDA-MLIR retries a failed literal attempt with unliteral
+        # arguments on the same template, and reports a literal request
+        # from any attempt in place of every other error.
+        literal_error = getattr(self, "_coop_literal_error", None)
+        try:
+            return typed(args, kws)
+        except TypedPipelineError as exc:
+            self._coop_literal_error = exc
+            raise
+        except nb.errors.ForceLiteralArg:
+            if literal_error is not None:
+                raise literal_error from None
+            raise
+
+    def typed(args, kws):
         bound = _bind(function, args, kws)
         items = bound["items_per_thread"]
         if isinstance(items, nb.types.Integer) and not isinstance(

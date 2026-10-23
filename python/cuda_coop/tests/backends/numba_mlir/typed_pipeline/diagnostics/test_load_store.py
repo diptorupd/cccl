@@ -52,6 +52,85 @@ def test_explicit_temp_storage_is_refused():
         _compile(kernel)
 
 
+def _zero_items(source, output):
+    items = coop.ThreadData(0)
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _qualified_zero_items(source, output):
+    items = qualified_coop.ThreadData(0)
+    qualified_coop.load(qualified_coop.this_block(), source, items)
+    qualified_coop.store(qualified_coop.this_block(), output, items)
+
+
+def _alignment_not_a_power_of_two(source, output):
+    items = coop.ThreadData(4, alignment=3)
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _bool_alignment(source, output):
+    items = coop.ThreadData(4, alignment=True)
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _runtime_alignment(source, output):
+    items = coop.ThreadData(4, alignment=source.shape[0])
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _unknown_dtype_name(source, output):
+    items = coop.ThreadData(4, dtype="float33")
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+@pytest.mark.parametrize(
+    "kernel, message",
+    [
+        (_zero_items, r"items_per_thread must be a positive integer, got 0"),
+        (
+            _qualified_zero_items,
+            r"items_per_thread must be a positive integer, got 0",
+        ),
+        (_alignment_not_a_power_of_two, r"alignment must be a power of 2"),
+        (_bool_alignment, r"alignment must be a compile-time integer"),
+        (_runtime_alignment, r"alignment must be a compile-time integer"),
+        (_unknown_dtype_name, r"float33"),
+    ],
+    ids=[
+        "zero_items",
+        "qualified_zero_items",
+        "alignment_not_a_power_of_two",
+        "bool_alignment",
+        "runtime_alignment",
+        "unknown_dtype_name",
+    ],
+)
+def test_a_thread_data_argument_coop_refuses_names_the_reason(kernel, message):
+    with pytest.raises(TypingError, match=message) as info:
+        _compile(kernel)
+    assert "Cannot request literal type" not in str(info.value)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Numba-CUDA-MLIR reports a literal request it cannot satisfy for "
+    "a value that is not a kernel argument as 'Cannot request literal type.'",
+)
+def test_a_runtime_items_per_thread_expression_names_the_reason():
+    def kernel(source, output):
+        items = coop.ThreadData(source.shape[0] // 32)
+        coop.load(coop.this_block(), source, items)
+        coop.store(coop.this_block(), output, items)
+
+    with pytest.raises(TypingError, match=r"items_per_thread"):
+        _compile(kernel)
+
+
 def test_a_group_other_than_the_block_is_refused():
     def kernel(source, output):
         items = coop.ThreadData(4)
