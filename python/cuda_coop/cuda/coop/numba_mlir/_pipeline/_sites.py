@@ -21,9 +21,11 @@ change the IR. For each kernel it:
 * binds each site's ``valid_items``, ``oob_default`` and ``offset`` as
   static or runtime by where the value comes from, as coop's planner does,
   and checks them and any scalar ``store`` value by coop's rules;
-* builds each site's dims-free request with its controls;
-* measures the kernel's own static shared memory and locates its dynamic
-  or runtime-sized shared arrays.
+* traces each site's ``temp_storage=`` to its ``TempStorage`` descriptor
+  and checks the descriptors (``_descriptors``);
+* builds each site's dims-free request with its controls and storage;
+* lists the kernel's own ``cuda.shared.array`` calls, with the bytes of the
+  statically sized ones.
 
 Every error a user can fix in the kernel's source is raised here, before
 anything is specialized or compiled.
@@ -36,6 +38,8 @@ from numbers import Integral
 from typing import Any
 
 from . import _bridges as nb
+from . import _descriptors
+from ._descriptors import Descriptor
 from ._errors import (
     DefaultDtypeMismatchError,
     DeviceFunctionCallError,
@@ -57,6 +61,7 @@ from ._templates import (
     is_wrapper_location,
     request_for,
     with_controls,
+    with_storage,
 )
 from ._types import ThreadDataType
 
@@ -73,6 +78,7 @@ class Site:
     """A call site; ``line`` is the kernel source line of the public call.
 
     ``stmt`` is the call's assignment; its target names the site.
+    ``storage`` is the ``TempStorage`` its ``temp_storage=`` names.
     """
 
     stmt: Any
@@ -80,21 +86,32 @@ class Site:
     line: int | None
     request: LoadStoreRequest
     scalar: Scalar | None = None
+    storage: Descriptor | None = None
+
+
+@dataclass(frozen=True)
+class UserSharedArray:
+    """A ``cuda.shared.array`` call of the kernel's own.
+
+    It is ``static`` when its shape is a constant with positive extents;
+    any other shape is a view of the launch's dynamic shared memory, and
+    ``size_in_bytes`` is 0.
+    """
+
+    static: bool
+    size_in_bytes: int
+    loc: Any
 
 
 @dataclass(frozen=True)
 class Sites:
     """A kernel's checked call sites, in program order.
 
-    ``user_shared_bytes`` is the static shared memory the kernel allocates
-    itself with ``cuda.shared.array``; ``user_dynamic_shared`` holds the
-    locations of the kernel's ``cuda.shared.array`` calls whose shape is
-    zero or not a compile-time constant.
+    ``user_shared`` lists the kernel's own ``cuda.shared.array`` calls.
     """
 
     sites: tuple[Site, ...]
-    user_shared_bytes: int
-    user_dynamic_shared: tuple[Any, ...] = ()
+    user_shared: tuple[UserSharedArray, ...] = ()
 
 
 _RUNTIME = object()
@@ -212,35 +229,18 @@ def _shape(expr: Any) -> Any:
     return expr.args[0] if expr.args else dict(expr.kws).get("shape")
 
 
-def _user_static_shared_bytes(func_ir: Any, typemap: dict, calltypes) -> int:
-    total = 0
-    for block in func_ir.blocks.values():
-        for stmt in block.body:
-            if not (
-                isinstance(stmt, nb.ir.Assign)
-                and isinstance(stmt.value, nb.ir.Expr)
-                and stmt.value.op == "call"
-                and _callee(typemap, stmt.value) is nb.cuda.shared.array
-            ):
-                continue
-            shape = _shape(stmt.value)
-            shape = None if shape is None else typemap[shape.name]
-            result = calltypes[stmt.value].return_type
-            if isinstance(shape, nb.types.IntegerLiteral):
-                # Numba types bool without a bitwidth and stores it in a byte.
-                bitwidth = getattr(result.dtype, "bitwidth", 8)
-                total += shape.literal_value * bitwidth // 8
-    return total
-
-
-def _user_dynamic_shared(func_ir: Any, typemap: dict) -> tuple[Any, ...]:
-    """Locate the ``cuda.shared.array`` calls that are not statically sized.
+def _user_shared(
+    func_ir: Any, typemap: dict, calltypes: Any
+) -> tuple[UserSharedArray, ...]:
+    """List the kernel's ``cuda.shared.array`` calls in program order.
 
     As in coop's planner, a shape is static when it resolves to a constant
-    whose extents are all positive; a zero extent declares a view of the
-    launch's dynamic shared memory.
+    (an integer, a NumPy integer or a tuple of them) whose extents are all
+    positive; a zero extent declares a view of the launch's dynamic shared
+    memory.
     """
 
+    import math
     import operator
 
     from .._compiler._rewrite_support import _INFERENCE_EXCEPTIONS
@@ -263,13 +263,16 @@ def _user_dynamic_shared(func_ir: Any, typemap: dict) -> tuple[Any, ...]:
                 shape = getattr(ty, "literal_value", None)
             extents = shape if isinstance(shape, tuple) else (shape,)
             try:
-                static = bool(extents) and all(
-                    e is not None and operator.index(e) > 0 for e in extents
-                )
+                extents = [operator.index(e) for e in extents]
+                static = bool(extents) and all(e > 0 for e in extents)
             except TypeError:
                 static = False
-            if not static:
-                found.append(stmt.loc)
+            size = 0
+            if static:
+                dtype = calltypes[stmt.value].return_type.dtype
+                # Numba types bool without a bitwidth and stores it in a byte.
+                size = math.prod(extents) * getattr(dtype, "bitwidth", 8) // 8
+            found.append(UserSharedArray(static, size, stmt.loc))
     return tuple(found)
 
 
@@ -302,7 +305,7 @@ class _Analysis:
                         )
         return found
 
-    def site(self, stmt, kind, loc, qualified) -> Site:
+    def site(self, stmt, kind, loc, qualified, storage) -> Site:
         expr = stmt.value
         line = None if loc is None else loc.line
         request = request_for(
@@ -317,7 +320,9 @@ class _Analysis:
         request = with_controls(
             request, self._controls(stmt, kind, request.dtype)
         )
-        return Site(stmt, kind, line, request, scalar)
+        if storage is not None:
+            request = with_storage(request, storage.options)
+        return Site(stmt, kind, line, request, scalar, storage)
 
     def _provenance(self, var: Any) -> Any:
         """Return ``var``'s static provenance, or ``_RUNTIME``.
@@ -554,6 +559,7 @@ def analyze(
     analysis = _Analysis(func_ir, typemap, args)
     found = analysis.collect()
     if targetoptions.get("device"):
+        _descriptors.check_device_function(args, func_id)
         if found:
             _, kind, loc, _ = found[0]
             name = func_id.func_qualname
@@ -566,12 +572,11 @@ def analyze(
             )
         return None
     _check_reads(func_ir, typemap)
-    sites = tuple(analysis.site(*f) for f in found)
-    return Sites(
-        sites,
-        _user_static_shared_bytes(func_ir, typemap, calltypes),
-        _user_dynamic_shared(func_ir, typemap),
+    storage = _descriptors.analyze(
+        func_ir, typemap, [(stmt, kind, loc) for stmt, kind, loc, _ in found]
     )
+    sites = tuple(analysis.site(*f, d) for f, d in zip(found, storage))
+    return Sites(sites, _user_shared(func_ir, typemap, calltypes))
 
 
-__all__ = ["Scalar", "Site", "Sites", "analyze"]
+__all__ = ["Scalar", "Site", "Sites", "UserSharedArray", "analyze"]

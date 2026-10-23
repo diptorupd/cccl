@@ -29,8 +29,8 @@ MODE_HINT = (
 )
 
 SUPPORTED_SURFACE = (
-    "this_block(), this_warp(), group_by(), ThreadData, and load and store "
-    "on a block group"
+    "this_block(), this_warp(), group_by(), ThreadData, TempStorage, and load "
+    "and store on a block group"
 )
 
 
@@ -203,6 +203,14 @@ class SharedMemoryAliasError(CoopSinglePhaseRewriteError, TypedPipelineError):
     """A user shared array that cooperative scratch would overlap."""
 
 
+class TempStorageBindingError(GroupRewriteError, TypedPipelineError):
+    """A ``temp_storage=`` operand that does not bind one descriptor."""
+
+
+class TempStorageError(CoopSinglePhaseRewriteError, TypedPipelineError):
+    """A ``TempStorage`` descriptor, or its scratch, that coop refuses."""
+
+
 def unsupported_primitive(qualified_name: str) -> TypedPipelineError:
     """The error for a cooperative primitive the typed pipeline lacks."""
 
@@ -230,6 +238,8 @@ __all__ = [
     "RewriteArgumentError",
     "SharedMemoryAliasError",
     "StoreDtypeMismatchError",
+    "TempStorageBindingError",
+    "TempStorageError",
     "TypedPipelineError",
     "TypedPipelineNotImplementedError",
     "TypedPipelineTypeError",

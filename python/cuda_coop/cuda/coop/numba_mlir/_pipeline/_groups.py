@@ -226,13 +226,13 @@ def register() -> None:
     global _registered
     if _registered:
         return
-    from ._lower import lower_group
+    from ._lower import lower_placeholder
 
     for key in (CoopGroupType, RefusedGroupType):
         nb.typing_registry.register_attr(_attributes(key))
     rules.register(RefusedGroupType, rules.CHECK, refused_groups)
     nb.lowering_registry.lower(GROUP_BY_KEY, nb.types.VarArg(nb.types.Any))(
-        lower_group
+        lower_placeholder
     )
     _registered = True
 

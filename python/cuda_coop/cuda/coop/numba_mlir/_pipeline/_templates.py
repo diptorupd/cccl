@@ -67,10 +67,13 @@ from ._errors import (
 )
 from ._types import (
     EXPLICIT,
+    FROM_IR,
     PRODUCER,
     STORE_DST,
+    TEMP_STORAGE_OPTIONS,
     CoopGroupType,
     RefusedGroupType,
+    TempStorageType,
     ThreadDataType,
 )
 
@@ -313,6 +316,29 @@ def _thread_data(function: Callable, qualified_name: str) -> Callable:
     return generic
 
 
+# TempStorage ------------------------------------------------------------------
+
+
+def _temp_storage_option(ty: Any) -> Any:
+    if _omitted(ty):
+        return None
+    if isinstance(ty, nb.types.Literal):
+        return ty.literal_value
+    return FROM_IR
+
+
+def _temp_storage(self, args, kws):
+    # Binding and validation wait for call resolution, which reads the
+    # options typing could not fold from the IR and reports both with coop's
+    # descriptor diagnostics.
+    bound = dict(zip(TEMP_STORAGE_OPTIONS[:1], args))
+    bound.update(kws)
+    options = tuple(
+        _temp_storage_option(bound.get(name)) for name in TEMP_STORAGE_OPTIONS
+    )
+    return nb.signature(TempStorageType(options), *args, *kws.values())
+
+
 # The method witness ----------------------------------------------------------
 
 
@@ -403,6 +429,10 @@ class LoadStoreRequest:
     value have the same request, and two that differ in a static value do
     not. Requests are interned by ``key``, so identity is equality.
 
+    ``storage`` is the ``(size_in_bytes, alignment, auto_sync, sharing)``
+    of the ``TempStorage`` the call is passed, or ``None`` for scratch the
+    pipeline provides.
+
     ``call`` is coop's ``GroupPrimitiveCall``; call resolution completes
     it with ``plan_group_primitive`` once it knows the block.
     """
@@ -414,6 +444,7 @@ class LoadStoreRequest:
     group: Any
     controls: tuple[tuple[str, Any], ...]
     call: Any
+    storage: tuple | None = None
 
     @property
     def key(self) -> tuple:
@@ -424,6 +455,7 @@ class LoadStoreRequest:
             self.items_per_thread,
             self.algorithm,
             self.controls,
+            self.storage,
         )
 
     def binding(self, name: str) -> Any:
@@ -435,7 +467,9 @@ class LoadStoreRequest:
 _REQUESTS: dict[tuple, LoadStoreRequest] = {}
 
 
-def _request_key(kind, group, dtype, items, algorithm, controls) -> tuple:
+def _request_key(
+    kind, group, dtype, items, algorithm, controls, storage
+) -> tuple:
     return (
         kind,
         group.key,
@@ -443,12 +477,13 @@ def _request_key(kind, group, dtype, items, algorithm, controls) -> tuple:
         items,
         algorithm,
         tuple((name, b.semantic_key) for name, b in controls),
+        storage,
     )
 
 
-def _intern(kind, group, dtype, items, algorithm, controls=()):
+def _intern(kind, group, dtype, items, algorithm, controls=(), storage=None):
     from ..._core import ArgumentBinding
-    from ..._core.group._model import GroupPrimitiveCall
+    from ..._core.group._model import GroupPrimitiveCall, StorageOwnership
     from ..._core.group.load_store import (
         GroupLoadStoreAlgorithm,
         GroupLoadStoreKind,
@@ -456,12 +491,22 @@ def _intern(kind, group, dtype, items, algorithm, controls=()):
     )
     from .._lowering._core import NumbaMlirCoreAdapter
 
-    key = _request_key(kind, group, dtype, items, algorithm, controls)
+    key = _request_key(kind, group, dtype, items, algorithm, controls, storage)
     request = _REQUESTS.get(key)
     if request is not None:
         return request
     bindings = dict(controls)
     omitted = ArgumentBinding.omitted()
+    caller_storage = {}
+    if storage is not None:
+        size, alignment, auto_sync, sharing = storage
+        caller_storage = {
+            "storage_ownership": StorageOwnership.CALLER,
+            "storage_sharing": sharing,
+            "storage_size_in_bytes": size,
+            "storage_alignment": alignment,
+            "storage_auto_sync": auto_sync,
+        }
     try:
         semantics = GroupLoadStoreSemantics(
             kind=GroupLoadStoreKind(kind),
@@ -471,12 +516,13 @@ def _intern(kind, group, dtype, items, algorithm, controls=()):
             valid_items=bindings.get("valid_items", omitted),
             oob_default=bindings.get("oob_default", omitted),
             offset=bindings.get("offset", omitted),
+            **caller_storage,
         )
     except (TypeError, ValueError) as exc:
         raise typed_error(exc, f"coop.{kind}: ") from None
     call = GroupPrimitiveCall(group=group.group, operation=semantics)
     request = _REQUESTS[key] = LoadStoreRequest(
-        kind, dtype, items, algorithm, group, tuple(controls), call
+        kind, dtype, items, algorithm, group, tuple(controls), call, storage
     )
     return request
 
@@ -497,6 +543,23 @@ def with_controls(
         request.items_per_thread,
         request.algorithm,
         controls,
+        request.storage,
+    )
+
+
+def with_storage(
+    request: LoadStoreRequest, storage: tuple | None
+) -> LoadStoreRequest:
+    """Return the request for ``request``'s transfer with ``storage``."""
+
+    return _intern(
+        request.kind,
+        request.group,
+        request.dtype,
+        request.items_per_thread,
+        request.algorithm,
+        request.controls,
+        storage,
     )
 
 
@@ -613,7 +676,9 @@ def _request(
     The request has no controls: whether a control is static or runtime
     depends on where its value comes from, which site analysis reads
     from the IR. A scalar ``store`` value stores one item per thread of the
-    destination's dtype; site analysis checks the value against it.
+    destination's dtype; site analysis checks the value against it. The
+    ``temp_storage=`` operand is left to site analysis too, which traces it
+    to its ``TempStorage`` constructors in the IR.
 
     Return ``None`` while the payload's dtype is still undefined, so that a
     later typing round retries with the refined payload. A qualified call
@@ -656,18 +721,13 @@ def _request(
 
 
 def _typable(kind: str, bound: dict) -> bool:
-    """Whether typing can type a call; refuses what typing cannot type.
+    """Whether typing can type a call.
 
     A call types once its payload's dtype is known. Every other check runs
     in call resolution, after typing, where its error keeps the class coop's
     planner raises.
     """
 
-    if not _omitted(bound.get("temp_storage")):
-        raise TypedPipelineError(
-            f"coop.{kind}: explicit temp_storage= is not supported on the "
-            "typed pipeline; omit it and the pipeline provides the scratch."
-        )
     payload = bound.get(_PAYLOAD[kind])
     return not isinstance(payload, nb.types.Array) or payload.dtype.is_precise()
 
@@ -854,8 +914,9 @@ _registered = False
 def register() -> None:
     """Register a template for every kernel-callable public object.
 
-    The group factories in ``GROUP_FACTORIES``, ``ThreadData``, ``load``
-    and ``store`` of both APIs are typed; every other primitive is
+    The group factories in ``GROUP_FACTORIES``, ``ThreadData``,
+    ``TempStorage``, ``load`` and ``store`` of both APIs are typed; every
+    other primitive is
     rejected.
     """
 
@@ -875,6 +936,8 @@ def register() -> None:
                 name,
                 prefer_literal=True,
             )
+        elif short == "TempStorage":
+            register_template(obj, _temp_storage, name, prefer_literal=True)
         elif operation in OPERATIONS.values():
             nb.attach_inline_wrapper(
                 obj, make_wrapper(obj, qualified_name, operation)
@@ -926,4 +989,5 @@ __all__ = [
     "register_template",
     "request_for",
     "with_controls",
+    "with_storage",
 ]

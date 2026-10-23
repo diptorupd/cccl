@@ -10,7 +10,8 @@ was decided by call resolution and stored in
 ``state.metadata["coop_plan"]``:
 
 * a group (``this_block()``, ``this_warp()``, ``group_by()`` and the other
-  ``this_*()`` factories) is a placeholder ``i8`` constant;
+  ``this_*()`` factories) and a ``TempStorage(...)`` are a placeholder
+  ``i8`` constant;
 * ``ThreadData(...)`` is a ``memref.alloca`` of its type's extent, aligned as
   the constructor's own ``alignment=`` asks, and its ``items_per_thread``
   is that extent as a constant;
@@ -39,7 +40,7 @@ from ._types import ThreadDataType
 SCRATCH_KEYWORD = "__coop_scratch"
 
 
-def lower_group(builder, target, args, kwargs):
+def lower_placeholder(builder, target, args, kwargs):
     builder.store_var(
         target, nb.arith.constant(nb.mlir_ir.IntegerType.get_signless(8), 0)
     )
@@ -173,7 +174,9 @@ def register() -> None:
     for obj, qualified_name in kernel_primitives().items():
         short = qualified_name.rsplit(".", 1)[1]
         if short in GROUP_FACTORIES:
-            nb.lowering_registry.lower(obj)(lower_group)
+            nb.lowering_registry.lower(obj)(lower_placeholder)
+        elif short == "TempStorage":
+            nb.lowering_registry.lower(obj, any_args)(lower_placeholder)
         elif short == "ThreadData":
             nb.lowering_registry.lower(obj, any_args)(_lower_thread_data)
     nb.lowering_registry.lower_getattr(ThreadDataType, "items_per_thread")(
@@ -184,4 +187,4 @@ def register() -> None:
     _registered = True
 
 
-__all__ = ["SCRATCH_KEYWORD", "lower_group", "register"]
+__all__ = ["SCRATCH_KEYWORD", "lower_placeholder", "register"]

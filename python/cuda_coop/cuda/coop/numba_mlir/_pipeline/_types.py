@@ -28,6 +28,13 @@ Stronger evidence replaces weaker evidence at a join; equal evidence that
 disagrees is a conflict, which the operation's template reports. A join with
 a plain ``types.Array`` is a typing error: the plain array's extent is not
 part of its type, so no cooperative operation could be specialized on it.
+
+``TempStorageType`` is the type of ``TempStorage(...)``: an opaque
+compile-time descriptor of caller-provided scratch. Its options are part of
+the type key as typing saw them; an option typing cannot fold (``64 * 1024``,
+a NumPy integer) is ``FROM_IR`` and call resolution reads it from the IR.
+Descriptors with different options meeting in one variable type as a
+descriptor without options, which call resolution rejects.
 """
 
 from __future__ import annotations
@@ -239,8 +246,59 @@ class ThreadDataType(nb.types.Array):
         return super().can_convert_to(typingctx, other)
 
 
+FROM_IR = "from-ir"
+
+TEMP_STORAGE_OPTIONS = ("size_in_bytes", "alignment", "auto_sync", "sharing")
+
+
+class TempStorageType(nb.types.Type):
+    """A ``TempStorage`` descriptor.
+
+    Parameters
+    ----------
+    options : tuple or None
+        The constructor's ``TEMP_STORAGE_OPTIONS`` as typing saw them: a
+        literal value, ``None`` when omitted, or ``FROM_IR``. ``None`` for
+        descriptors with different options joined in one variable.
+    """
+
+    def __init__(self, options: tuple | None) -> None:
+        self.options = options
+        if options is None:
+            shown = "mixed"
+        else:
+            shown = ", ".join(
+                f"{name}={value!r}"
+                for name, value in zip(TEMP_STORAGE_OPTIONS, options)
+                if value is not None
+            )
+        super().__init__(name=f"coop.TempStorage({shown})")
+
+    @property
+    def key(self) -> tuple:
+        return ("coop.TempStorage", self.options)
+
+    def unify(self, typingctx, other):
+        if isinstance(other, TempStorageType):
+            return self if other == self else TempStorageType(None)
+        return None
+
+    def can_convert_to(self, typingctx, other):
+        if isinstance(other, TempStorageType) and other.options is None:
+            return nb.Conversion.safe
+        return super().can_convert_to(typingctx, other)
+
+
+def is_temp_storage(ty: Any) -> bool:
+    """Whether ``ty`` is a descriptor, possibly joined with ``None``."""
+
+    if isinstance(ty, nb.types.Optional):
+        ty = ty.type
+    return isinstance(ty, TempStorageType)
+
+
 class _I8Model(nb.PrimitiveModel):
-    """A group value is a placeholder byte; it carries no run-time data."""
+    """A group or descriptor is a placeholder byte with no run-time data."""
 
     def __init__(self, dmm, fe_type):
         super().__init__(dmm, fe_type, nb.mlir_ir.IntegerType.get_signless(8))
@@ -256,19 +314,24 @@ def register() -> None:
     if _registered:
         return
     nb.register_model(CoopGroupType)(_I8Model)
+    nb.register_model(TempStorageType)(_I8Model)
     nb.register_model(ThreadDataType)(nb.ArrayModel)
     _registered = True
 
 
 __all__ = [
     "EXPLICIT",
+    "FROM_IR",
     "PRODUCER",
     "STORE_DST",
     "STRENGTH_NAMES",
+    "TEMP_STORAGE_OPTIONS",
     "WARP_GROUP_KINDS",
     "WRITE",
     "CoopGroupType",
     "RefusedGroupType",
+    "TempStorageType",
     "ThreadDataType",
+    "is_temp_storage",
     "register",
 ]
