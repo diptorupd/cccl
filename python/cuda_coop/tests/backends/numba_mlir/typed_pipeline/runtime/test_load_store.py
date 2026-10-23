@@ -86,6 +86,33 @@ def test_a_join_of_payloads_of_different_dtypes_is_refused_at_launch():
         )
 
 
+def test_writes_that_disagree_with_the_store_destination_at_launch():
+    from cuda.coop.numba_mlir._compiler._group_errors import (
+        MemoryDtypeMismatchError,
+    )
+
+    coop = coop_common
+
+    @cuda.jit
+    def kernel(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(ITEMS)
+        base = cuda.threadIdx.x * ITEMS
+        for i in range(ITEMS):
+            items[i] = source[base + i]
+        coop.store(block, output, items)
+
+    source = _source(np.int32)
+    with pytest.raises(
+        MemoryDtypeMismatchError,
+        match=r"memory dtype float32 does not match .* \(int32 at line \d+\)",
+    ):
+        kernel[1, THREADS](
+            cuda.to_device(source),
+            cuda.device_array(source.size, np.float32),
+        )
+
+
 @requires_fix("PHI_REFINEMENT")
 @pytest.mark.parametrize("algorithm", ["direct", "transpose"])
 def test_two_constructors_joined_by_a_branch(algorithm):

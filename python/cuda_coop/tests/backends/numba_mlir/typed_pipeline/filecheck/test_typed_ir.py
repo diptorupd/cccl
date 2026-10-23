@@ -79,7 +79,7 @@ def test_store_destination_types_a_payload_without_a_load():
         block = coop.this_block()
         items = coop.ThreadData(4)
         for i in range(4):
-            items[i] = 1
+            items[i] = source[i]
         coop.store(block, output, items)
 
     testing.check(

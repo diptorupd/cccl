@@ -12,6 +12,7 @@ planner also reports is an instance of the planner's exception class too.
 
 from __future__ import annotations
 
+from .._compiler._group_errors import MemoryDtypeMismatchError
 from .._compiler._rewrite_support import CoopSinglePhaseRewriteError
 from . import _bridges as nb
 
@@ -33,6 +34,15 @@ class PayloadJoinDtypeError(CoopSinglePhaseRewriteError, TypedPipelineError):
     """Payloads of different dtypes meet in one variable."""
 
 
+class StoreDtypeMismatchError(MemoryDtypeMismatchError, TypedPipelineError):
+    """A payload's writes disagree with the destination it is stored to."""
+
+    def __init__(self, msg, loc=None):
+        # MemoryDtypeMismatchError's initializer formats a message of its own
+        # and would skip the one that records the location.
+        TypedPipelineError.__init__(self, msg, loc=loc)
+
+
 def unsupported_primitive(qualified_name: str) -> TypedPipelineError:
     """The error for a cooperative primitive the typed pipeline lacks."""
 
@@ -47,6 +57,7 @@ __all__ = [
     "MODE_HINT",
     "SUPPORTED_SURFACE",
     "PayloadJoinDtypeError",
+    "StoreDtypeMismatchError",
     "TypedPipelineError",
     "unsupported_primitive",
 ]

@@ -19,7 +19,10 @@ typing instead:
   source depended on the read) is a stale read, and an error.
 * check: a payload whose dtype comes from indexed writes alone takes it from
   the first write typed, and converts the others silently; so all of its
-  writes must have that dtype.
+  writes must have that dtype. A payload whose dtype comes from the
+  destination of a store would convert its writes silently too, so they
+  must have the destination's dtype. A ``load`` or ``dtype=`` outranks the
+  writes, which then convert as assignment does.
 
 Indexed writes are ``setitem`` constraints, not calls, so they never wait.
 """
@@ -31,8 +34,8 @@ from typing import Any
 
 from . import _bridges as nb
 from . import _typing_rules as rules
-from ._errors import TypedPipelineError
-from ._types import PRODUCER, WRITE, ThreadDataType
+from ._errors import StoreDtypeMismatchError, TypedPipelineError
+from ._types import PRODUCER, STORE_DST, WRITE, ThreadDataType
 
 _WITNESS_KEYS = frozenset(
     {"coop.thread_data.refine_load", "coop.thread_data.refine_store"}
@@ -101,24 +104,47 @@ def released_reads_agree(typeinfer_, matching, released):
 
 
 def writes_agree(typeinfer_, matching, released):
-    """Check: a payload typed by indexed writes alone has one dtype."""
+    """Check: a payload typed by writes or a store has its writes' dtype."""
 
     written: dict[str, dict] = {}
     for name, value, loc in rules.writes(typeinfer_):
         payload = matching.get(name)
-        if payload is None or payload.strength != WRITE or value is None:
+        if payload is None or payload.strength > STORE_DST or value is None:
             continue
         written.setdefault(name, {}).setdefault(nb.unliteral(value), loc)
     errors = []
     for name, dtypes in written.items():
-        if set(dtypes) == {matching[name].dtype}:
+        payload = matching[name]
+        if set(dtypes) == {payload.dtype}:
             continue
-        found = ", ".join(sorted(map(str, dtypes)))
+        if payload.strength == WRITE:
+            found = ", ".join(sorted(map(str, dtypes)))
+            errors.append(
+                TypedPipelineError(
+                    f"coop.ThreadData {name!r}: its writes disagree on the "
+                    f"dtype ({found}). Pass dtype= or make the writes agree.",
+                    loc=next(iter(dtypes.values())),
+                )
+            )
+            continue
+        others = sorted(
+            (
+                (dtype, loc)
+                for dtype, loc in dtypes.items()
+                if dtype != payload.dtype
+            ),
+            key=lambda item: item[1].line,
+        )
+        found = ", ".join(
+            f"{dtype} at line {loc.line}" for dtype, loc in others
+        )
         errors.append(
-            TypedPipelineError(
-                f"coop.ThreadData {name!r}: its writes disagree on the dtype "
-                f"({found}). Pass dtype= or make the writes agree.",
-                loc=next(iter(dtypes.values())),
+            StoreDtypeMismatchError(
+                f"coop.store memory dtype {payload.dtype} does not match the "
+                f"dtype of the writes to coop.ThreadData {name!r} ({found}). "
+                f"Write {payload.dtype} values, or pass dtype= to "
+                "coop.ThreadData to convert them.",
+                loc=others[0][1],
             )
         )
     return errors

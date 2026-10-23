@@ -8,7 +8,10 @@ Each case is compiled, without a launch, for a block of 64 threads and four
 items per thread. A case either compiles, and its payload has the expected
 type, or fails with the expected diagnostic. The expectations are coop's
 planner decisions, with store evidence ranked over write evidence and
-the write-agreement check on.
+the write-agreement check on, except ``w_store``: its writes from a
+``range`` loop variable are int64, which the planner cannot type before
+inference and so lets the int32 store destination convert. The typed
+pipeline checks them like any other write and refuses the kernel.
 
 Two cases call a never-inlined device function that holds a coop call. The
 typed pipeline does not plan device functions yet, so ``ni_inner_load`` no
@@ -433,7 +436,12 @@ CASES = {
         d_explicit, (F32, F32), error=r"conflicts with source dtype float32"
     ),
     "w_store": Case(
-        w_store, (I32, I32), ("td", _payload("int32", "store-dst"))
+        w_store,
+        (I32, I32),
+        error=(
+            r"coop\.store memory dtype int32 does not match the dtype of the "
+            r"writes to coop\.ThreadData 'td' \(int64 at line \d+\)"
+        ),
     ),
     "k4_extent": Case(
         k4_extent,
