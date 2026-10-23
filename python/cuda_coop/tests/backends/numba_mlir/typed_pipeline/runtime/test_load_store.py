@@ -54,6 +54,38 @@ def test_k1_load_store_inferred(coop):
     np.testing.assert_array_equal(d_out.copy_to_host(), source)
 
 
+def test_a_join_of_payloads_of_different_dtypes_is_refused_at_launch():
+    from cuda.coop.numba_mlir._compiler._rewrite_support import (
+        CoopSinglePhaseRewriteError,
+    )
+
+    coop = coop_common
+
+    @cuda.jit
+    def kernel(source, written, output, flag):
+        block = coop.this_block()
+        a = coop.ThreadData(ITEMS)
+        b = coop.ThreadData(ITEMS)
+        coop.store(block, written, a)
+        coop.load(block, source, b)
+        if flag[0]:
+            x = a
+        else:
+            x = b
+        coop.store(block, output, x)
+
+    source = _source()
+    with pytest.raises(
+        CoopSinglePhaseRewriteError, match=r"int32 from 'a' \(line \d+\)"
+    ):
+        kernel[1, THREADS](
+            cuda.to_device(source),
+            cuda.device_array(source.size, np.int32),
+            cuda.device_array_like(source),
+            cuda.to_device(np.ones(1, np.int32)),
+        )
+
+
 @requires_fix("PHI_REFINEMENT")
 @pytest.mark.parametrize("algorithm", ["direct", "transpose"])
 def test_two_constructors_joined_by_a_branch(algorithm):

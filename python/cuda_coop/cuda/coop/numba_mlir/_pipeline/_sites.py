@@ -9,6 +9,8 @@ typed function and nothing else: not the launch, not NVRTC. It does not
 change the IR. For each kernel it:
 
 * collects the cooperative call sites in program order;
+* checks that every payload a payload variable takes, at a join or through
+  a copy, has the variable's dtype (in device functions too);
 * refuses cooperative calls inside functions compiled as separate device
   functions (``targetoptions["device"]``), which have no launch;
 * checks that every read of a payload typed to its final dtype (that
@@ -33,7 +35,7 @@ from numbers import Integral
 from typing import Any
 
 from . import _bridges as nb
-from ._errors import TypedPipelineError
+from ._errors import PayloadJoinDtypeError, TypedPipelineError
 from ._templates import (
     CONTROLS,
     OPERATIONS,
@@ -115,6 +117,73 @@ def _check_reads(func_ir: Any, typemap: dict) -> None:
                     f"payload's dtype is {payload.dtype}. Pass "
                     f"dtype={payload.dtype} to coop.ThreadData."
                 )
+
+
+def _origin(var: Any, definitions: dict) -> Any:
+    """Follow ``var`` back through plain copies to the payload it names."""
+
+    seen = set()
+    while var.name not in seen:
+        seen.add(var.name)
+        found = definitions.get(var.name, ())
+        if len(found) != 1 or not isinstance(found[0], nb.ir.Var):
+            break
+        var = found[0]
+    return var
+
+
+def _check_joins(func_ir: Any, typemap: dict) -> None:
+    """Every value a payload variable takes must have the variable's dtype.
+
+    Typing lets the stronger evidence decide a join's dtype but leaves each
+    input's own; lowering cannot reinterpret one payload's storage as
+    another dtype.
+    """
+
+    joins: dict[str, tuple[Any, list]] = {}
+    loc = None
+    for label in sorted(func_ir.blocks):
+        for stmt in func_ir.blocks[label].body:
+            if not is_wrapper_location(stmt.loc):
+                loc = stmt.loc
+            if not (
+                isinstance(stmt, nb.ir.Assign)
+                and isinstance(typemap.get(stmt.target.name), ThreadDataType)
+            ):
+                continue
+            value = stmt.value
+            if isinstance(value, nb.ir.Var):
+                incoming = [value]
+            elif isinstance(value, nb.ir.Expr) and value.op == "phi":
+                incoming = [
+                    v for v in value.incoming_values if isinstance(v, nb.ir.Var)
+                ]
+            else:
+                continue
+            _, found = joins.setdefault(stmt.target.name, (stmt.target, []))
+            found.extend(
+                (var, loc)
+                for var in incoming
+                if isinstance(typemap.get(var.name), ThreadDataType)
+            )
+
+    definitions = func_ir._definitions
+    for target, incoming in joins.values():
+        dtype = typemap[target.name].dtype
+        wrong = [at for var, at in incoming if typemap[var.name].dtype != dtype]
+        if not wrong:
+            continue
+        found = ", ".join(
+            f"{typemap[var.name].dtype} from "
+            f"{_origin(var, definitions).unversioned_name!r} (line {at.line})"
+            for var, at in incoming
+        )
+        raise PayloadJoinDtypeError(
+            f"coop.ThreadData {target.unversioned_name!r} has dtype {dtype}, "
+            f"but it joins payloads of different dtypes: {found}. Give "
+            "them one dtype, for example with dtype= on coop.ThreadData.",
+            loc=wrong[0],
+        )
 
 
 def _callee(typemap: dict, expr: Any) -> Any:
@@ -419,6 +488,7 @@ def analyze(
     with them is an error.
     """
 
+    _check_joins(func_ir, typemap)
     analysis = _Analysis(func_ir, typemap, args)
     found = analysis.collect()
     if targetoptions.get("device"):

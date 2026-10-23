@@ -6,11 +6,13 @@
 
 Every error is a Numba ``TypingError``, so it is reported with the kernel's
 source location like any other typing failure, whether it is raised by a
-typing template or by call resolution after typing.
+typing template or by call resolution after typing. An error that coop's
+planner also reports is an instance of the planner's exception class too.
 """
 
 from __future__ import annotations
 
+from .._compiler._rewrite_support import CoopSinglePhaseRewriteError
 from . import _bridges as nb
 
 MODE_HINT = (
@@ -27,6 +29,10 @@ class TypedPipelineError(nb.errors.TypingError):
     """A cooperative construct the typed pipeline rejects."""
 
 
+class PayloadJoinDtypeError(CoopSinglePhaseRewriteError, TypedPipelineError):
+    """Payloads of different dtypes meet in one variable."""
+
+
 def unsupported_primitive(qualified_name: str) -> TypedPipelineError:
     """The error for a cooperative primitive the typed pipeline lacks."""
 
@@ -40,6 +46,7 @@ def unsupported_primitive(qualified_name: str) -> TypedPipelineError:
 __all__ = [
     "MODE_HINT",
     "SUPPORTED_SURFACE",
+    "PayloadJoinDtypeError",
     "TypedPipelineError",
     "unsupported_primitive",
 ]
