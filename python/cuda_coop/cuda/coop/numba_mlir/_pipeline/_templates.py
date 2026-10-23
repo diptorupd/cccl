@@ -701,6 +701,12 @@ def make_wrapper(
 # Registration ----------------------------------------------------------------
 
 
+def _never_generic(self, args, kws):
+    if not args and not kws:
+        return nb.signature(nb.types.boolean)
+    return None
+
+
 def _lower_never(builder, target, args, kwargs):
     builder.store_var(
         target, nb.arith.constant(nb.mlir_ir.IntegerType.get_signless(1), 0)
@@ -763,7 +769,7 @@ def register() -> None:
             f"coop.thread_data.{method}", nb.types.VarArg(nb.types.Any)
         )(_lower_witness)
 
-    nb.extending.type_callable(_never)(lambda context: lambda: nb.types.boolean)
+    register_template(_never, _never_generic, "never")
     nb.lowering_registry.lower(_never)(_lower_never)
     _registered = True
 

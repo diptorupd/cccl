@@ -23,7 +23,10 @@ is not public is reached through ``_bridges``. The compiler fixes the
 pipeline relies on are detected by probing (``_ncm_fixes``); where one is
 missing, a pinned patch in ``_ncm_patches`` stands in for it, applied only
 by this pipeline, or a kernel that needs it is refused with an error naming
-the fix (``_missing_fixes``). The supported surface is
+the fix (``_missing_fixes``). Probing initializes the compiler's typing
+context, so activation only registers, and the probes and patches run at
+the first compile, before it types anything (``_prepare``). The supported
+surface is
 ``this_block()``, ``ThreadData``, and ``load`` and ``store`` on a block
 group; any other cooperative call is a typing error, never a fallback.
 """
@@ -44,27 +47,18 @@ def _activate() -> None:
     if _activated:
         return
     from . import (
-        _bridges,
         _lower,
-        _missing_fixes,
-        _ncm_fixes,
-        _ncm_patches,
         _payload_rules,
+        _prepare,
         _resolve,
         _templates,
         _types,
-        _typing_rules,
     )
 
-    hooks = _ncm_fixes.TYPEINFER_HOOKS
-    _ncm_patches.apply(*_ncm_patches.stand_in(hooks, _typing_rules.ENGINE))
-    if _ncm_fixes.present(hooks):
-        _typing_rules.install()
     _payload_rules.register()
-    _missing_fixes.register()
     _types.register()
     _templates.register()
     _lower.register()
     _resolve.register()
-    _bridges.refresh_registries()
+    _prepare.register()
     _activated = True

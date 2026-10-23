@@ -49,6 +49,26 @@ def test_typed_registers_call_resolution_and_never_imports_the_planner(
     assert "call-resolution True" in result.stdout
 
 
+def test_typed_activation_leaves_the_compiler_contexts_uninitialized():
+    result = run_python(
+        """
+import cuda.coop.numba_mlir
+from numba_cuda_mlir.descriptor import mlir_target
+from cuda.coop.numba_mlir._pipeline import _prepare
+
+print(
+    "initialized",
+    mlir_target._typingctx_initialized or mlir_target._targetctx_initialized,
+)
+print("prepared", _prepare.prepared())
+""",
+        "typed",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "initialized False" in result.stdout
+    assert "prepared False" in result.stdout
+
+
 def test_unknown_pipeline_is_an_error():
     result = run_python("import cuda.coop.numba_mlir", "mixed")
     assert result.returncode != 0

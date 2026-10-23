@@ -12,7 +12,8 @@ its behaviour fails.
 
 The probes need no GPU and change no registry: the imprecise value the
 refinement probes refine comes from a function type passed as an argument.
-Each probe runs once per process, when the typed pipeline activates.
+Each probe runs once per process, at the typed pipeline's first compile
+(``_prepare``) or when ``present`` is first asked about its fix.
 
 Where a fix has no patch to stand in for it, ``_missing_fixes`` refuses a
 kernel that needs it with an error naming the fix.

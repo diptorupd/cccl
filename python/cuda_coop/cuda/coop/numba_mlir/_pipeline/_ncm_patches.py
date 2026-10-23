@@ -7,10 +7,10 @@
 Each patch replaces attributes of Numba-CUDA-MLIR classes with versions that
 behave as an upstream ask would make them, and is listed with that ask in the
 ``_bridges`` table. A patch stands in for a fix that ``_ncm_fixes`` probes
-for (``stand_in``): the typed pipeline's ``_activate`` applies the patches
-for the fixes the compiler lacks, once, before it registers anything; the
-default pipeline never imports this module, so it leaves the compiler
-untouched.
+for (``stand_in``): the typed pipeline's ``_prepare`` applies the patches
+for the fixes the compiler lacks, once, before its first compile types
+anything; the default pipeline never imports this module, so it leaves the
+compiler untouched.
 
 A patch is pinned to what it was written against: Numba-CUDA-MLIR
 ``NCM_VERSION`` and a digest of the source of every attribute it replaces or

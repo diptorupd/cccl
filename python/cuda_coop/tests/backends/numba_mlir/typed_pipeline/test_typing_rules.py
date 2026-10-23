@@ -18,7 +18,22 @@ from cuda.coop.numba_mlir._pipeline import _payload_rules, testing
 from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
 from cuda.coop.numba_mlir._pipeline._typing_rules import RULES, Event
 
-from ._support import BLOCK, CHIP, f32_in_out, native, requires_typed_pipeline
+from ._support import (
+    BLOCK,
+    CHIP,
+    f32_in_out,
+    native,
+    prepare,
+    requires_typed_pipeline,
+)
+
+
+@pytest.fixture(autouse=True)
+def _prepared():
+    """``RULES.without`` restores the rules it saved, so register them all
+    before any test swaps them."""
+
+    prepare()
 
 
 def _compile(kernel):

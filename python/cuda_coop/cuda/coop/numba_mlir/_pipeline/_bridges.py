@@ -16,6 +16,7 @@ the upstream change that would replace it.
 Bridge                                 Replaced by
 =====================================  =======================================
 ``register_rewrite("after-inference")``  a public post-typing hook
+``register_rewrite("before-inference")``  a public pre-typing hook
 ``attach_inline_wrapper``              ``register_inline_alias``, or letting
                                        a template refine its call's arguments
 ``force_literal_arg``                  a fixed ``bind_fold_arguments``
@@ -40,9 +41,10 @@ unsupported compiler fails closed instead of compiling kernels incorrectly.
 
 The row marked "patch" changes Numba-CUDA-MLIR's own behaviour. It lives
 in ``_typing_rules``, is pinned through ``_ncm_patches`` to Numba-CUDA-MLIR
-0.5.4 and to the source of what it replaces, and is applied only when the
-typed pipeline activates on a compiler that lacks the fix, which
-``_ncm_fixes`` probes for; a mismatch fails closed in the same way. A fix
+0.5.4 and to the source of what it replaces, and is applied only by the
+typed pipeline, before its first compile types anything, on a compiler that
+lacks the fix, which ``_ncm_fixes`` probes for; a mismatch fails closed in
+the same way. A fix
 with no patch, the argument-sized ``cuda.local.array`` of
 NVIDIA/numba-cuda-mlir#394, the phi refinement of
 NVIDIA/numba-cuda-mlir#395 or the tuple refinement of
@@ -112,6 +114,16 @@ def register_after_inference_rewrite(rewrite: type) -> type:
     """
 
     return register_rewrite("after-inference")(rewrite)
+
+
+def register_before_inference_rewrite(rewrite: type) -> type:
+    """Construct ``rewrite`` for every function before it is typed.
+
+    As after inference, the registry is process-wide and also runs on nested
+    compiles, including the untyped pipeline of a type-inference probe.
+    """
+
+    return register_rewrite("before-inference")(rewrite)
 
 
 def attach_inline_wrapper(function: Callable, wrapper: Callable) -> None:
@@ -230,6 +242,7 @@ __all__ = [
     "rebind_targetoptions",
     "refresh_registries",
     "register_after_inference_rewrite",
+    "register_before_inference_rewrite",
     "register_model",
     "require_launch_config",
     "resolve_gpu_target",

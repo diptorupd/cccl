@@ -37,6 +37,19 @@ def native(name: str) -> bool:
     return _ncm_fixes.present(getattr(_ncm_fixes, name))
 
 
+def prepare() -> None:
+    """In typed mode, do the pipeline's first-compile preparation now.
+
+    For a test that reads or swaps what the preparation sets up (patches,
+    typing rules) before it compiles anything.
+    """
+
+    if TYPED:
+        from cuda.coop.numba_mlir._pipeline import _prepare
+
+        _prepare.prepare()
+
+
 def requires_fix(name: str) -> pytest.MarkDecorator:
     """Skip a typed-mode test on a compiler without the fix ``name``."""
 
