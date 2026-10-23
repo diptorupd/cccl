@@ -353,6 +353,7 @@ class Case(NamedTuple):
     payload: tuple[str, str] | None = None
     error: str | None = None
     marks: tuple = ()
+    raises: type[Exception] = Exception
 
 
 F32_PRODUCER = _payload("float32", "producer")
@@ -365,7 +366,19 @@ DEVICE_GATE = (
 CASES = {
     "k1": Case(k1, (F32, F32), ("items", F32_PRODUCER)),
     "kw": Case(kw, (F32, F32), ("td", F32_PRODUCER)),
-    "kw_positional": Case(kw_positional, (F32, F32), ("td", F32_PRODUCER)),
+    # A keyword-only control passed positionally is Python's TypeError, as
+    # on coop's planner. Without the argument-binding fix the wrapper takes
+    # it as an ordinary parameter.
+    "kw_positional": (
+        Case(
+            kw_positional,
+            (F32, F32),
+            error=r"load\(\) too many positional arguments",
+            raises=TypeError,
+        )
+        if TYPED and native("ARGUMENT_BINDING")
+        else Case(kw_positional, (F32, F32), ("td", F32_PRODUCER))
+    ),
     # Which side of the join Numba types first depends on what the process
     # has already compiled; a plain array first unifies to a plain array,
     # which the common API's store refuses.
@@ -467,7 +480,9 @@ def test_case(name):
     case = CASES[name]
     signature = types.void(*case.args)
     if case.error is not None:
-        with pytest.raises(Exception, match=re.compile(case.error, re.DOTALL)):
+        with pytest.raises(
+            case.raises, match=re.compile(case.error, re.DOTALL)
+        ):
             testing.compile_kernel(
                 case.kernel, signature, block=BLOCK, chip=CHIP
             )

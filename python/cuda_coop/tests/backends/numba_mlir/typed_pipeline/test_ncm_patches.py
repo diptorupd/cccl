@@ -669,3 +669,28 @@ def test_a_plain_kernel_joining_arrays_and_scalars_is_unchanged():
     for first, expected in ((1, 6), (0, 1.5)):
         joined[1, 32](output, np.array([first], np.int32))
         np.testing.assert_array_equal(output, expected)
+
+
+# Argument binding (N1) ------------------------------------------------------
+
+
+def test_the_argument_binding_probe_agrees_with_the_compiler():
+    from numba_cuda_mlir.numba_cuda.core import errors
+
+    fixes = _ncm_fixes()
+    assert fixes.present(fixes.ARGUMENT_BINDING) == hasattr(
+        errors, "ArgumentBindingError"
+    )
+
+
+@requires_typed_pipeline
+def test_the_wrappers_keep_keyword_only_controls_exactly_with_the_fix():
+    from cuda import coop
+    from cuda.coop.numba_mlir._pipeline import _templates
+
+    fixes = _ncm_fixes()
+    source = _templates.WRAPPER_SOURCE["cuda.coop.load"]
+    assert ("/, *, algorithm=" in source) == fixes.present(
+        fixes.ARGUMENT_BINDING
+    )
+    assert coop.load.py_func.__name__ == "load"

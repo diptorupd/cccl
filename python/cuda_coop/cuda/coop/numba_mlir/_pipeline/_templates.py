@@ -844,11 +844,14 @@ def make_wrapper(
     """Generate the inline wrapper of a public ``load`` or ``store`` object.
 
     The wrapper has the public object's parameters and name, so a call that
-    does not bind fails as the same call to the public object does, except
-    that keyword-only parameters are relaxed to ordinary parameters:
-    Numba's inliner cannot bind keyword-only parameters. The private
-    operation still receives them by keyword.
+    does not bind fails as the same call to the public object does. A
+    compiler without the argument-binding fix cannot bind keyword-only
+    parameters of an inlined function, so there they are relaxed to
+    ordinary parameters. The private operation still receives them by
+    keyword.
     """
+
+    from . import _ncm_fixes
 
     params = list(inspect.signature(public).parameters.values())
     positional_only = [p for p in params if p.kind is p.POSITIONAL_ONLY]
@@ -858,7 +861,11 @@ def make_wrapper(
     header = [_parameter_text(p) for p in positional_only]
     if positional_only:
         header.append("/")
-    header += [_parameter_text(p) for p in ordinary]
+    keyword_only = _ncm_fixes.present(_ncm_fixes.ARGUMENT_BINDING)
+    for p in ordinary:
+        if keyword_only and p.kind is p.KEYWORD_ONLY and "*" not in header:
+            header.append("*")
+        header.append(_parameter_text(p))
     call = [p.name for p in positional_only]
     call += [
         p.name if p.kind is p.POSITIONAL_OR_KEYWORD else f"{p.name}={p.name}"

@@ -5,13 +5,14 @@
 """Numba-CUDA-MLIR fixes the typed pipeline relies on, found by probing.
 
 A fix is detected by what the installed compiler does, never by its
-version: each probe runs Numba-CUDA-MLIR's own type inference on a small
-function that types only with the fix, and checks the result. A compiler
-with the fix backported passes, and one that has the fix's names but not
-its behaviour fails.
+version: each probe runs Numba-CUDA-MLIR's own type inference, or its
+argument binding, on a small function that behaves as expected only with
+the fix, and checks the result. A compiler with the fix backported passes,
+and one that has the fix's names but not its behaviour fails.
 
 The probes need no GPU and change no registry: the imprecise value the
 refinement probes refine comes from a function type passed as an argument.
+The argument-binding probe initializes no compiler context.
 Each probe runs once per process, at the typed pipeline's first compile
 (``_prepare``) or when ``present`` is first asked about its fix.
 
@@ -21,6 +22,7 @@ kernel that needs it with an error naming the fix.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
@@ -36,6 +38,7 @@ try:
     from numba_cuda_mlir.numba_cuda.compiler import run_frontend
     from numba_cuda_mlir.numba_cuda.core import typeinfer
     from numba_cuda_mlir.numba_cuda.core.ssa import reconstruct_ssa
+    from numba_cuda_mlir.numba_cuda.typing import templates
 except ImportError as exc:
     raise nb.TypedPipelineUnavailableError(
         "The cuda.coop typed pipeline probes Numba-CUDA-MLIR's type "
@@ -49,16 +52,18 @@ _PULL = "https://github.com/NVIDIA/numba-cuda-mlir/pull/"
 class Fix:
     """A Numba-CUDA-MLIR change the typed pipeline relies on.
 
-    ``pull`` is the upstream pull request.
+    ``pull`` is the upstream pull request, ``None`` until there is one.
     """
 
     name: str
     ask: str
-    pull: int
+    pull: int | None
     probe: Callable[[], bool]
 
     @property
     def reference(self) -> str:
+        if self.pull is None:
+            return "not yet proposed upstream"
         return f"NVIDIA/numba-cuda-mlir#{self.pull}, {_PULL}{self.pull}"
 
 
@@ -261,7 +266,57 @@ LOCAL_ARRAY_SHAPE = Fix(
 )
 
 
+# Argument binding (N1) ------------------------------------------------------
+
+
+def _keyword_only(a, *, b=0):
+    pass
+
+
+def _binds_like_python() -> bool:
+    """Keyword-only parameters bind by keyword, and a call that does not
+    bind raises a ``TypeError`` naming the callee, as in Python.
+
+    ``fold_arguments`` is the binding the inliner runs on every inlined
+    call, given the callee's name.
+    """
+
+    pysig = inspect.signature(_keyword_only)
+
+    def fold(args, kws, **callee):
+        return templates.fold_arguments(
+            pysig,
+            args,
+            kws,
+            lambda index, param, value: value,
+            lambda index, param, default: default,
+            lambda index, param, values: values,
+            **callee,
+        )
+
+    try:
+        if tuple(fold((1,), {"b": 2})) != (1, 2):
+            return False
+        fold((1, 2), {}, name="f")
+    except nb.errors.TypingError as exc:
+        return isinstance(exc, TypeError) and (
+            "f() too many positional arguments" in str(exc)
+        )
+    except (TypeError, IndexError):
+        return False
+    return False
+
+
+ARGUMENT_BINDING = Fix(
+    name="argument binding",
+    ask="N1",
+    pull=None,
+    probe=_binds_like_python,
+)
+
+
 __all__ = [
+    "ARGUMENT_BINDING",
     "LOCAL_ARRAY_SHAPE",
     "PHI_REFINEMENT",
     "TUPLE_REFINEMENT",
