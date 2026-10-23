@@ -16,7 +16,9 @@ from numba_cuda_mlir import types
 
 import cuda.coop.numba_mlir as qualified_coop
 from cuda import coop
+from cuda.coop._core import BindingKind
 from cuda.coop.numba_mlir._compiler._group_errors import (
+    InvalidLoadStoreAlgorithmError,
     NonConstantGroupArgumentError,
     UnsupportedLoadStoreGroupError,
 )
@@ -233,19 +235,43 @@ def test_requests_on_different_groups_are_distinct():
 
 
 @pytest.mark.parametrize(
-    "algorithm, factory",
-    [("direct", "warp_load"), ("transpose", "_warp_load_with_storage")],
+    "algorithm, factory, scratch",
+    [
+        ("direct", "warp_load", False),
+        ("transpose", "_warp_load_with_storage", True),
+    ],
 )
 def test_a_warp_request_completes_to_a_warp_provider_of_its_width(
-    algorithm, factory
+    algorithm, factory, scratch
 ):
     for width in (8, 16, 32):
-        completed, kwargs, _ = _specialize._complete(
+        completed = _specialize._complete(
             _request(_warp(width), algorithm), BLOCK
         )
-        assert completed.__name__ == factory
-        assert kwargs["threads_in_warp"] == width
-        assert kwargs["threads_per_block"] == BLOCK
+        assert completed.factory.__name__ == factory
+        assert completed.kwargs["threads_in_warp"] == width
+        assert completed.kwargs["threads_per_block"] == BLOCK
+        assert completed.kwargs["offset"].kind is BindingKind.RUNTIME
+        assert completed.tile == _specialize.GroupTile(width, width * 4)
+        assert completed.scratch is scratch
+
+
+def test_a_block_request_has_no_group_tile():
+    completed = _specialize._complete(
+        _request(CoopGroupType(coop.this_block())), BLOCK
+    )
+    assert completed.factory.__name__ == "load"
+    assert completed.tile is None
+    assert not completed.scratch
+
+
+@pytest.mark.parametrize("width", [None, 8])
+def test_a_warp_request_takes_only_the_warp_algorithms(width):
+    with pytest.raises(
+        InvalidLoadStoreAlgorithmError, match=r"direct,\s+striped,\s+transpose"
+    ) as info:
+        _specialize._complete(_request(_warp(width), "warp_transpose"), BLOCK)
+    assert isinstance(info.value, TypedPipelineError)
 
 
 def test_logical_warp_widths_have_distinct_specializations_and_cache_keys():

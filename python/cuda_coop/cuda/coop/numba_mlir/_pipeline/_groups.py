@@ -87,7 +87,7 @@ class UnsupportedGroupError(UnsupportedLoadStoreGroupError, TypedPipelineError):
 
 
 class WarpLoadStoreUnsupportedError(UnsupportedGroupError):
-    """A load or store on a warp group, which the typed pipeline lacks."""
+    """A warp load or store the typed pipeline lacks: one that needs scratch."""
 
 
 _DESCRIPTOR_ERRORS = (

@@ -49,7 +49,7 @@ def _describe(binding: Any) -> str:
     return str(value.item() if hasattr(value, "item") else value)
 
 
-def _site_plan(index, site, block, slice_, barrier_after) -> SitePlan:
+def _site_plan(index, site, block, slice_, barrier_after, tile) -> SitePlan:
     request = site.request
     value = ()
     if site.scalar is not None:
@@ -61,6 +61,12 @@ def _site_plan(index, site, block, slice_, barrier_after) -> SitePlan:
                 else f"{site.scalar.value.item()!r}",
             ),
         )
+    group = ()
+    if tile is not None:
+        group = (
+            ("group", f"{request.group.kind}/{tile.width}"),
+            ("tile_origin", f"rank/{tile.width}*{tile.items}"),
+        )
     return SitePlan(
         index=index,
         operation=site.kind,
@@ -70,6 +76,7 @@ def _site_plan(index, site, block, slice_, barrier_after) -> SitePlan:
             ("dtype", str(request.dtype)),
             ("items_per_thread", request.items_per_thread),
             ("block", "x".join(map(str, block))),
+            *group,
             *value,
             *((name, _describe(binding)) for name, binding in request.controls),
         ),
@@ -137,15 +144,16 @@ def _resolve_sites(
     plan.bundle = bundle.specializations
     plan.backing = storage.backing
     plan.regions.extend(storage.regions)
-    for index, (site, slice_, barrier) in enumerate(
+    for index, (site, slice_, barrier, tile) in enumerate(
         zip(
             sites.sites,
             storage.slices,
             specialization.barrier_after,
+            specialization.tiles,
             strict=True,
         )
     ):
-        plan.sites.append(_site_plan(index, site, block, slice_, barrier))
+        plan.sites.append(_site_plan(index, site, block, slice_, barrier, tile))
     return calls
 
 

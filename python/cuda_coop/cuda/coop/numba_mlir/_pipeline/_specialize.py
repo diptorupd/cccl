@@ -14,7 +14,12 @@ the checked sites and the launch's block it:
 * decides which sites take scratch, from each provider's storage ABI, and
   places a barrier after each one whose plan asks for a storage-reuse
   barrier: every site with implicit scratch, and the sites of a
-  ``TempStorage`` with ``auto_sync=True``, as coop's planner does.
+  ``TempStorage`` with ``auto_sync=True``, as coop's planner does;
+* records, for each site on a warp group, where its group's tile starts,
+  which coop's planner leaves to the backend.
+
+A warp site whose provider needs scratch is refused: the typed pipeline
+does not lay out per-warp scratch yet.
 
 Specializing generates provider source and nothing more: this stage does
 not call NVRTC, so scratch use is decided before any size is known. It does
@@ -25,9 +30,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
-from ._errors import MODE_HINT, TypedPipelineError, planner_text, typed_error
+from ._errors import (
+    MODE_HINT,
+    InvalidLoadStoreAlgorithmError,
+    TypedPipelineError,
+    planner_text,
+    typed_error,
+)
 from ._groups import UnsupportedGroupError, WarpLoadStoreUnsupportedError
 from ._sites import Sites
 from ._templates import LoadStoreRequest
@@ -42,11 +53,26 @@ class LaunchBounds:
 
 
 @dataclass(frozen=True)
+class GroupTile:
+    """Where a group's tile starts in memory, for one call.
+
+    A tile holds ``items`` elements (``width * items_per_thread``). The
+    group of the thread with x-major linear rank ``r`` moves the tile at
+    ``(r // width) * items``, plus the call's ``offset``.
+    """
+
+    width: int
+    items: int
+
+
+@dataclass(frozen=True)
 class Specialization:
     """What the kernel's sites specialized to, one entry per site.
 
     ``algorithms`` holds each distinct provider once, in first-use order;
-    ``site_algorithms`` repeats them per site.
+    ``site_algorithms`` repeats them per site. ``tiles`` holds each site's
+    ``GroupTile``, or ``None`` when the provider addresses the block's
+    tile itself.
     """
 
     block: tuple[int, int, int]
@@ -55,24 +81,38 @@ class Specialization:
     scratch: tuple[bool, ...]
     barrier_after: tuple[bool, ...]
     launch_bounds: LaunchBounds
+    tiles: tuple[GroupTile | None, ...] = ()
 
 
 # Request completion ----------------------------------------------------------
 
-_COMPLETIONS: dict[tuple, tuple[Any, dict, bool]] = {}
+
+class Completion(NamedTuple):
+    """A request completed against a block: the provider and its inputs.
+
+    ``barrier`` is whether the plan asks for a reuse barrier after the call.
+    ``tile`` is set when the plan leaves the group's tile origin to the
+    caller (warp groups); the factory then takes a runtime ``offset``.
+    ``scratch`` is whether the planned provider needs scratch storage.
+    """
+
+    factory: Any
+    kwargs: dict
+    barrier: bool
+    tile: GroupTile | None
+    scratch: bool
 
 
-def _complete(
-    request: LoadStoreRequest, block: tuple
-) -> tuple[Any, dict, bool]:
-    """Return the provider factory, its arguments and the reuse barrier.
+_COMPLETIONS: dict[tuple, Completion] = {}
 
-    The barrier is whether the plan asks for one after the call.
+
+def _complete(request: LoadStoreRequest, block: tuple) -> Completion:
+    """Return the provider factory and its arguments for ``request``.
 
     ``plan_group_primitive`` hashes the request's semantic key, which is
     costly, so its result is memoized per request and block. A warp group
     plans to a warp provider, which takes the group's width as
-    ``threads_in_warp``.
+    ``threads_in_warp`` and, as an offset, its tile's origin.
     """
 
     key = (request.key, block)
@@ -89,9 +129,22 @@ def _complete(
     )
     from ..._core.launch import LaunchFacts
     from .._compiler import _group_errors as planner
+    from .._compiler._load_store_algorithms import (
+        _WARP_LOAD_STORE_ALGORITHMS,
+    )
     from .._lowering import _load_store
     from .._lowering._core import NumbaMlirCoreAdapter
 
+    if (
+        request.group.is_warp
+        and request.algorithm not in _WARP_LOAD_STORE_ALGORITHMS
+    ):
+        reason = planner.InvalidLoadStoreAlgorithmError(
+            request.kind,
+            ", ".join(sorted(_WARP_LOAD_STORE_ALGORITHMS)),
+            request.group.kind,
+        )
+        raise InvalidLoadStoreAlgorithmError(planner_text(reason))
     try:
         plan = plan_group_primitive(
             request.call, LaunchFacts(exact_block_dim=block)
@@ -118,6 +171,12 @@ def _complete(
         if storage_free
         else f"_{prefix}{request.kind}_with_storage"
     )
+    tile = None
+    if implementation.metadata.get("requires_runtime_effective_offset"):
+        tile = GroupTile(
+            plan.topology.logical_width,
+            implementation.metadata["effective_offset_stride"],
+        )
     omitted = ArgumentBinding.omitted()
     kwargs = {
         **group_kwargs,
@@ -130,7 +189,11 @@ def _complete(
         ],
         "algorithm": implementation.metadata["algorithm"],
         "num_valid_items": request.binding("valid_items") or omitted,
-        "offset": request.binding("offset") or omitted,
+        "offset": (
+            ArgumentBinding.runtime()
+            if tile is not None
+            else request.binding("offset") or omitted
+        ),
     }
     if request.binding("oob_default") is not None:
         kwargs["oob_default"] = request.binding("oob_default")
@@ -139,7 +202,13 @@ def _complete(
         and plan.synchronization.storage_reuse_barrier
         is not SynchronizationScope.NONE
     )
-    completed = (getattr(_load_store, factory_name), kwargs, barrier)
+    completed = Completion(
+        getattr(_load_store, factory_name),
+        kwargs,
+        barrier,
+        tile,
+        not storage_free,
+    )
     _COMPLETIONS[key] = completed
     return completed
 
@@ -161,8 +230,8 @@ def _instantiate(
         collect_specializations() as collected,
     ):
         for request in requests:
-            factory, kwargs, _ = _complete(request, block)
-            factory(**kwargs)
+            completed = _complete(request, block)
+            completed.factory(**completed.kwargs)
     if len(collected) != len(requests):
         raise AssertionError("a provider factory did not specialize once")
     return collected
@@ -201,6 +270,7 @@ def plan(
     block: tuple,
     targetoptions: dict,
     barriers: Sequence[bool] | None = None,
+    tiles: Sequence[GroupTile | None] | None = None,
 ) -> Specialization:
     """Decide scratch, barriers and ``launch_bounds`` for specialized sites.
 
@@ -221,6 +291,9 @@ def plan(
             s and b for s, b in zip(scratch, barriers, strict=True)
         ),
         launch_bounds=launch_bounds,
+        tiles=(
+            (None,) * len(site_algorithms) if tiles is None else tuple(tiles)
+        ),
     )
 
 
@@ -234,18 +307,19 @@ def specialize(
     """Specialize every site's provider for ``block`` and plan around them.
 
     Every request is completed first, so that coop's planning checks the
-    groups against the block, before a warp site is refused.
+    groups against the block, before a warp site that needs scratch is
+    refused.
     """
 
     unique = list(dict.fromkeys(s.request for s in sites.sites))
-    for request in unique:
-        _complete(request, block)
+    completions = {request: _complete(request, block) for request in unique}
     for site in sites.sites:
-        if site.request.group.is_warp:
+        if site.request.group.is_warp and completions[site.request].scratch:
             raise WarpLoadStoreUnsupportedError(
                 f"coop.{site.kind} at line {site.line} on "
-                f"{site.request.group}: warp load/store is not supported on "
-                f"the typed pipeline yet. {MODE_HINT}"
+                f"{site.request.group}: warp {site.request.algorithm} needs "
+                "scratch storage, not supported on the typed pipeline yet. "
+                f"{MODE_HINT}"
             )
     algorithms = _instantiate(unique, block, target)
     algorithm_for = dict(zip(unique, algorithms))
@@ -254,11 +328,14 @@ def specialize(
         [algorithm_for[s.request] for s in sites.sites],
         block,
         targetoptions,
-        [_complete(s.request, block)[2] for s in sites.sites],
+        [completions[s.request].barrier for s in sites.sites],
+        tiles=[completions[s.request].tile for s in sites.sites],
     )
 
 
 __all__ = [
+    "Completion",
+    "GroupTile",
     "LaunchBounds",
     "Specialization",
     "plan",

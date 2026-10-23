@@ -31,7 +31,7 @@ from ._link import Bundle
 from ._lower import SCRATCH_KEYWORD
 from ._plan import KernelPlan
 from ._sites import Site
-from ._specialize import Specialization
+from ._specialize import GroupTile, Specialization
 from ._storage import StorageLayout
 
 
@@ -49,7 +49,11 @@ class CallEntry:
         a one-item array of ``dtype`` holding the scalar argument ``index``,
         or the static ``value`` when it is not ``None``;
     ``("value", keyword)``
-        the call's keyword argument, converted to the ABI type.
+        the call's keyword argument, converted to the ABI type;
+    ``("tile_offset", width, items, block, base)``
+        the origin of the thread's group tile, ``(rank // width) * items``
+        for the x-major rank of the thread in ``block``, plus ``base``: an
+        integer, or a ``("value", keyword)`` operand.
     """
 
     symbol: str
@@ -95,11 +99,36 @@ def _select_method(algorithm: Any, operands: int) -> Any:
     raise AssertionError(f"{algorithm.c_name} has no {operands}-operand method")
 
 
-def _operands(method: Any, site: Site, algorithm: Any, scratch: bool) -> tuple:
+def _runtime_operands(site: Site, tile: GroupTile | None, block) -> list:
+    """Return the runtime controls' operands, in ``CONTROLS`` order.
+
+    With a group tile, the provider's ``offset`` is the tile's origin plus
+    the call's own offset, static or runtime.
+    """
+
+    runtime = [
+        ("value", name)
+        for name, binding in site.request.controls
+        if binding.kind.value == "runtime"
+        and (tile is None or name != "offset")
+    ]
+    if tile is not None:
+        offset = site.request.binding("offset")
+        if offset is None:
+            base = 0
+        elif offset.kind.value == "runtime":
+            base = ("value", "offset")
+        else:
+            base = int(offset.value)
+        runtime.append(("tile_offset", tile.width, tile.items, block, base))
+    return runtime
+
+
+def _operands(method: Any, site: Site, algorithm: Any, scratch: bool, runtime):
     """Pair each provider operand with where lowering finds its value.
 
     Coop's providers take the scratch pointer, the memory pointer, the
-    payload, then the runtime controls in ``CONTROLS`` order.
+    payload, then the ``runtime`` operands.
     """
 
     from .. import _types as coop_types
@@ -115,11 +144,7 @@ def _operands(method: Any, site: Site, algorithm: Any, scratch: bool) -> tuple:
         else ("box", 2, site.request.dtype, site.scalar.value)
     )
     pointers = [("scratch",)] * scratch + [("pointer", 1), payload]
-    runtime = [
-        ("value", name)
-        for name, binding in site.request.controls
-        if binding.kind.value == "runtime"
-    ]
+    runtime = list(runtime)
     abi_arguments, operands = [], []
     for parameter in _inputs(method):
         if isinstance(parameter, pointer_kinds):
@@ -134,11 +159,19 @@ def _operands(method: Any, site: Site, algorithm: Any, scratch: bool) -> tuple:
 
 
 def _call_entry(
-    site: Site, algorithm: Any, scratch: bool, barrier: bool, bundle: Bundle
+    site: Site,
+    algorithm: Any,
+    scratch: bool,
+    barrier: bool,
+    tile: GroupTile | None,
+    block: tuple,
+    bundle: Bundle,
 ) -> CallEntry:
-    runtime = sum(b.kind.value == "runtime" for _, b in site.request.controls)
-    method = _select_method(algorithm, 2 + scratch + runtime)
-    abi_arguments, operands = _operands(method, site, algorithm, scratch)
+    runtime = _runtime_operands(site, tile, block)
+    method = _select_method(algorithm, 2 + scratch + len(runtime))
+    abi_arguments, operands = _operands(
+        method, site, algorithm, scratch, runtime
+    )
     return CallEntry(
         symbol=algorithm.mangled_name(method) + "__abi",
         abi_arguments=abi_arguments,
@@ -259,13 +292,20 @@ def materialize(
 
     calls = {
         site.stmt.target.name: _call_entry(
-            site, algorithm, scratch, barrier, bundle
+            site,
+            algorithm,
+            scratch,
+            barrier,
+            tile,
+            specialization.block,
+            bundle,
         )
-        for site, algorithm, scratch, barrier in zip(
+        for site, algorithm, scratch, barrier, tile in zip(
             sites,
             specialization.site_algorithms,
             storage.scratch,
             specialization.barrier_after,
+            specialization.tiles,
             strict=True,
         )
     }

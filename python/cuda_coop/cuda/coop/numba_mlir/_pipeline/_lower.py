@@ -19,7 +19,9 @@ was decided by call resolution and stored in
   scratch pointer first when the provider takes one, then the memory and
   payload pointers, then the runtime controls converted to their ABI
   types, followed by a ``gpu.barrier`` when the plan has one. A scalar
-  ``store`` value is boxed into a one-item array first.
+  ``store`` value is boxed into a one-item array first. On a warp group
+  the offset is the group tile's origin, computed from the thread index
+  as the plan describes it.
 """
 
 from __future__ import annotations
@@ -111,8 +113,48 @@ def _box(builder, var, dtype, value):
     return array
 
 
+def _keyword_value(builder, var, abi_type):
+    return nb.cast_value(
+        builder,
+        builder.load_var(var),
+        builder.get_numba_type(var.name),
+        abi_type,
+    )
+
+
+def _tile_offset(builder, operand, abi_type, keywords):
+    _, width, items, block, base = operand
+    index = nb.mlir_ir.IndexType.get()
+
+    def constant(value):
+        return nb.arith.constant(index, value)
+
+    def thread_id(axis):
+        return nb.gpu.thread_id(getattr(nb.gpu.Dimension, axis))
+
+    rank = thread_id("x")
+    if block[1] > 1 or block[2] > 1:
+        yz = nb.arith.addi(
+            thread_id("y"), nb.arith.muli(constant(block[1]), thread_id("z"))
+        )
+        rank = nb.arith.addi(rank, nb.arith.muli(constant(block[0]), yz))
+    origin = nb.arith.muli(
+        nb.arith.divui(rank, constant(width)), constant(items)
+    )
+    origin = nb.arith.index_cast(builder.get_mlir_type(abi_type), origin)
+    if base == 0:
+        return origin
+    if isinstance(base, int):
+        base = nb.arith.constant(builder.get_mlir_type(abi_type), base)
+    else:
+        base = _keyword_value(builder, keywords[base[1]], abi_type)
+    return nb.arith.addi(origin, base)
+
+
 def _operand(builder, operand, abi_type, args, keywords):
     tag = operand[0]
+    if tag == "tile_offset":
+        return _tile_offset(builder, operand, abi_type, keywords)
     if tag == "scratch":
         return nb.memref_data_pointer(
             builder.load_var(keywords[SCRATCH_KEYWORD])
@@ -122,13 +164,7 @@ def _operand(builder, operand, abi_type, args, keywords):
     if tag == "box":
         _, index, dtype, value = operand
         return nb.memref_data_pointer(_box(builder, args[index], dtype, value))
-    var = keywords[operand[1]]
-    return nb.cast_value(
-        builder,
-        builder.load_var(var),
-        builder.get_numba_type(var.name),
-        abi_type,
-    )
+    return _keyword_value(builder, keywords[operand[1]], abi_type)
 
 
 def _lower_operation(builder, target, args, kwargs):

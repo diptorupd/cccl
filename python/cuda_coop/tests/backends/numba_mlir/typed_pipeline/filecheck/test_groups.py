@@ -6,7 +6,9 @@
 
 A kernel that only builds groups has no cooperative call to resolve, so it
 compiles; its typed IR shows each group's type, a logical warp's width
-included, and its MLIR shows that a group carries no run-time data.
+included, and its MLIR shows that a group carries no run-time data. A load
+or store on a warp group plans its group's tile origin, and its MLIR
+computes that origin from the thread index and passes it as the offset.
 """
 
 # ruff: noqa: F841
@@ -79,6 +81,59 @@ def test_a_phi_and_a_tuple_projection_keep_the_warp_type():
         CHECK-SAME:      :: coop.group[threads_within_warp, 8]
         """,
         dump="typed_ir",
+        block=WARP_BLOCK,
+        chip=CHIP,
+    )
+
+
+def test_a_warp_site_plans_its_group_tile_origin():
+    @cuda.jit
+    def tiles(source, output):
+        items = coop.ThreadData(4)
+        coop.load(coop.this_warp(), source, items, algorithm="striped")
+        coop.store(coop.this_warp().group_by(8), output, items, offset=2)
+
+    testing.check(
+        tiles,
+        f32_in_out(),
+        """
+        CHECK-LABEL: coop-plan tiles
+        CHECK:         bundle sites=2 specializations=2
+        CHECK-NOT:     backing
+        CHECK:         site #0 load {{.*}} algorithm=striped
+        CHECK-SAME:      group=warp/32 tile_origin=rank/32*128
+        CHECK-NOT:     barrier
+        CHECK:         site #1 store {{.*}} algorithm=direct
+        CHECK-SAME:      group=threads_within_warp/8 tile_origin=rank/8*32
+        CHECK-SAME:      offset=2
+        CHECK-NOT:     barrier
+        """,
+        dump="plan",
+        block=WARP_BLOCK,
+        chip=CHIP,
+    )
+
+
+def test_a_warp_site_passes_its_tile_origin_as_the_offset():
+    @cuda.jit
+    def origin(source, output):
+        items = coop.ThreadData(4)
+        coop.load(coop.this_warp().group_by(8), source, items, offset=5)
+        coop.store(coop.this_block(), output, items)
+
+    testing.check(
+        origin,
+        f32_in_out(),
+        """
+        CHECK:     [[TID:%.+]] = gpu.thread_id  x
+        CHECK:     [[GROUP:%.+]] = arith.divui [[TID]], %c8
+        CHECK:     [[ORIGIN:%.+]] = arith.muli [[GROUP]], %c32
+        CHECK:     [[WIDE:%.+]] = arith.index_cast [[ORIGIN]] : index to i64
+        CHECK:     [[OFFSET:%.+]] = arith.addi [[WIDE]], %c5_i64
+        CHECK:     func.call @{{.*}}warp_load{{.*}}, [[OFFSET]])
+        CHECK-NOT: gpu.barrier
+        """,
+        dump="mlir",
         block=WARP_BLOCK,
         chip=CHIP,
     )
