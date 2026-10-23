@@ -22,7 +22,8 @@ MODE_HINT = (
 )
 
 SUPPORTED_SURFACE = (
-    "this_block(), ThreadData, and load and store on a block group"
+    "this_block(), this_warp(), group_by(), ThreadData, and load and store "
+    "on a block group"
 )
 
 

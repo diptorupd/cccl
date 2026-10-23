@@ -4,9 +4,10 @@
 
 """Numba types for cooperative groups and per-thread payloads.
 
-``CoopGroupType`` is the type of ``this_block()``. It carries coop's own
-``ThreadGroup`` request and no launch dimensions; call resolution reads the
-block from the launch once typing is done.
+``CoopGroupType`` is the type of ``this_block()``, ``this_warp()`` and a
+``group_by()`` partition of either. It carries coop's own ``ThreadGroup``
+request and no launch dimensions; call resolution reads the block from the
+launch once typing is done.
 
 ``ThreadDataType`` is the type of ``ThreadData(items, dtype=...)``. It is a
 one-dimensional C-contiguous ``types.Array``, so indexing and every array
@@ -46,26 +47,85 @@ STRENGTH_NAMES = {
 }
 
 
+WARP_GROUP_KINDS = frozenset({"warp", "threads_within_warp"})
+
+
 class CoopGroupType(nb.types.Type):
     """A cooperative group request, without launch dimensions.
+
+    The key is the group's semantic key: its kind and, for a ``group_by``
+    partition, the partition's count and coverage. A logical warp's width
+    is therefore part of the type, and two widths never share a request.
 
     Parameters
     ----------
     group : cuda.coop._core.thread_group.ThreadGroup
-        The request coop's own ``this_block()`` returns on the host.
+        The descriptor coop's own ``this_block()``, ``this_warp()`` or
+        ``group_by()`` returns on the host.
     """
 
     def __init__(self, group: Any) -> None:
         self.group = group
-        super().__init__(name=f"coop.group[{group.kind}]")
+        detail = ""
+        if group.mapping is not None:
+            detail = f", {group.mapping.count}"
+            if not group.mapping.exhaustive:
+                detail += ", partial"
+        super().__init__(name=f"coop.group[{group.kind}{detail}]")
 
     @property
     def key(self) -> tuple:
-        return ("coop.group", self.group.kind)
+        return ("coop.group", self.group.semantic_key)
+
+    @property
+    def kind(self) -> str:
+        return self.group.kind
 
     @property
     def is_block(self) -> bool:
         return self.group.kind == "block"
+
+    @property
+    def is_warp(self) -> bool:
+        """Whether the group is a physical or a logical warp."""
+
+        return self.group.kind in WARP_GROUP_KINDS
+
+    @property
+    def width(self) -> int | None:
+        """A warp group's thread count (``LOGICAL_WARP_THREADS``)."""
+
+        return self.group.static_size if self.is_warp else None
+
+
+class RefusedGroupType(nb.types.Type):
+    """A group whose construction coop refuses, typed so typing can finish.
+
+    A typing template's exception reaches the user as a plain
+    ``TypingError``, so ``group_by`` types a refused partition as this type
+    instead, and a check at the last fixed point of typing
+    (``_groups.refused_groups``) raises ``error`` with its class.
+
+    Parameters
+    ----------
+    error : type
+        The exception class to raise.
+    message : str
+        Its message.
+    parameter : str or None
+        The ``group_by`` argument that was not a compile-time constant, if
+        that is the refusal.
+    """
+
+    def __init__(
+        self, error: type, message: str, parameter: str | None = None
+    ) -> None:
+        self.error, self.message, self.parameter = error, message, parameter
+        super().__init__(name=f"coop.group[refused: {message}]")
+
+    @property
+    def key(self) -> tuple:
+        return ("coop.group.refused", self.error, self.message, self.parameter)
 
 
 class ThreadDataType(nb.types.Array):
@@ -205,8 +265,10 @@ __all__ = [
     "PRODUCER",
     "STORE_DST",
     "STRENGTH_NAMES",
+    "WARP_GROUP_KINDS",
     "WRITE",
     "CoopGroupType",
+    "RefusedGroupType",
     "ThreadDataType",
     "register",
 ]

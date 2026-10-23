@@ -25,7 +25,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._errors import TypedPipelineError
+from ._errors import MODE_HINT, TypedPipelineError
+from ._groups import UnsupportedGroupError, WarpLoadStoreUnsupportedError
 from ._sites import Sites
 from ._templates import LoadStoreRequest
 
@@ -63,7 +64,9 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
     """Return the provider factory and its arguments for ``request``.
 
     ``plan_group_primitive`` hashes the request's semantic key, which is
-    costly, so its result is memoized per request and block.
+    costly, so its result is memoized per request and block. A warp group
+    plans to a warp provider, which takes the group's width as
+    ``threads_in_warp``.
     """
 
     key = (request.key, block)
@@ -82,20 +85,30 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
         plan = plan_group_primitive(
             request.call, LaunchFacts(exact_block_dim=block)
         ).require_supported()
-    except (NotImplementedError, TypeError, ValueError) as exc:
+    except NotImplementedError as exc:
+        raise UnsupportedGroupError(f"coop.{request.kind}: {exc}") from None
+    except (TypeError, ValueError) as exc:
         raise TypedPipelineError(f"coop.{request.kind}: {exc}") from None
-    if plan.target is not GroupLoweringTarget.CUB_BLOCK:
+    storage_free = plan.temp_storage.ownership is StorageOwnership.NONE
+    if plan.target is GroupLoweringTarget.CUB_BLOCK:
+        prefix, group_kwargs = "", {}
+    elif plan.target is GroupLoweringTarget.CUB_WARP:
+        prefix = "warp_"
+        group_kwargs = {"threads_in_warp": plan.topology.logical_width}
+    else:
         raise TypedPipelineError(
             f"coop.{request.kind}: planned for {plan.target.value}, which the "
             "typed pipeline does not lower"
         )
     implementation = plan.implementation
-    storage_free = plan.temp_storage.ownership is StorageOwnership.NONE
     factory_name = (
-        request.kind if storage_free else f"_{request.kind}_with_storage"
+        f"{prefix}{request.kind}"
+        if storage_free
+        else f"_{prefix}{request.kind}_with_storage"
     )
     omitted = ArgumentBinding.omitted()
     kwargs = {
+        **group_kwargs,
         "dtype": NumbaMlirCoreAdapter().normalize_dtype(
             implementation.template_arguments["T"]
         ),
@@ -195,9 +208,22 @@ def specialize(
     target: Any,
     targetoptions: dict,
 ) -> Specialization:
-    """Specialize every site's provider for ``block`` and plan around them."""
+    """Specialize every site's provider for ``block`` and plan around them.
+
+    Every request is completed first, so that coop's planning checks the
+    groups against the block, before a warp site is refused.
+    """
 
     unique = list(dict.fromkeys(s.request for s in sites.sites))
+    for request in unique:
+        _complete(request, block)
+    for site in sites.sites:
+        if site.request.group.is_warp:
+            raise WarpLoadStoreUnsupportedError(
+                f"coop.{site.kind} at line {site.line} on "
+                f"{site.request.group}: warp load/store is not supported on "
+                f"the typed pipeline yet. {MODE_HINT}"
+            )
     algorithms = _instantiate(unique, block, target)
     algorithm_for = dict(zip(unique, algorithms))
     return plan(

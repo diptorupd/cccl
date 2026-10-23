@@ -9,7 +9,8 @@ provider symbol and ABI, the scratch operand, the barrier, the link items)
 was decided by call resolution and stored in
 ``state.metadata["coop_plan"]``:
 
-* ``this_block()`` is a placeholder ``i8`` constant;
+* a group (``this_block()``, ``this_warp()``, ``group_by()``) is a
+  placeholder ``i8`` constant;
 * ``ThreadData(...)`` is a ``memref.alloca`` of its type's extent, aligned as
   the constructor's own ``alignment=`` asks, and its ``items_per_thread``
   is that extent as a constant;
@@ -28,6 +29,7 @@ from typing import Any
 from . import _bridges as nb
 from ._templates import (
     _CONSTRUCTOR_PARAMETERS,
+    GROUP_FACTORIES,
     OPERATIONS,
     constructor_alignment,
     kernel_primitives,
@@ -37,7 +39,7 @@ from ._types import ThreadDataType
 SCRATCH_KEYWORD = "__coop_scratch"
 
 
-def _lower_this_block(builder, target, args, kwargs):
+def lower_group(builder, target, args, kwargs):
     builder.store_var(
         target, nb.arith.constant(nb.mlir_ir.IntegerType.get_signless(8), 0)
     )
@@ -170,8 +172,8 @@ def register() -> None:
     any_args = nb.types.VarArg(nb.types.Any)
     for obj, qualified_name in kernel_primitives().items():
         short = qualified_name.rsplit(".", 1)[1]
-        if short == "this_block":
-            nb.lowering_registry.lower(obj)(_lower_this_block)
+        if short in GROUP_FACTORIES:
+            nb.lowering_registry.lower(obj)(lower_group)
         elif short == "ThreadData":
             nb.lowering_registry.lower(obj, any_args)(_lower_thread_data)
     nb.lowering_registry.lower_getattr(ThreadDataType, "items_per_thread")(
@@ -182,4 +184,4 @@ def register() -> None:
     _registered = True
 
 
-__all__ = ["SCRATCH_KEYWORD", "register"]
+__all__ = ["SCRATCH_KEYWORD", "lower_group", "register"]

@@ -58,6 +58,7 @@ def test_the_registered_rules_are_coops_typing_spec():
         expected.append(("check", "ThreadDataType", "tupled_payloads"))
     if not native("LOCAL_ARRAY_SHAPE"):
         expected.insert(1, ("gate", "Function", "argument_sized_local_array"))
+    expected.append(("check", "RefusedGroupType", "refused_groups"))
     assert [row[:3] for row in RULES.describe()] == expected
 
 

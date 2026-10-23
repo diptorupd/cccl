@@ -26,9 +26,9 @@ by this pipeline, or a kernel that needs it is refused with an error naming
 the fix (``_missing_fixes``). Probing initializes the compiler's typing
 context, so activation only registers, and the probes and patches run at
 the first compile, before it types anything (``_prepare``). The supported
-surface is
-``this_block()``, ``ThreadData``, and ``load`` and ``store`` on a block
-group; any other cooperative call is a typing error, never a fallback.
+surface is ``this_block()``, ``this_warp()`` and their ``group_by()``
+partitions (``_groups``), ``ThreadData``, and ``load`` and ``store`` on a
+block group; any other cooperative call is a typing error, never a fallback.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ def _activate() -> None:
     if _activated:
         return
     from . import (
+        _groups,
         _lower,
         _payload_rules,
         _prepare,
@@ -58,6 +59,7 @@ def _activate() -> None:
     _payload_rules.register()
     _types.register()
     _templates.register()
+    _groups.register()
     _lower.register()
     _resolve.register()
     _prepare.register()

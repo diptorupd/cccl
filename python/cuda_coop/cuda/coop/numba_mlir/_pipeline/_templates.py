@@ -54,6 +54,7 @@ from ._types import (
     PRODUCER,
     STORE_DST,
     CoopGroupType,
+    RefusedGroupType,
     ThreadDataType,
 )
 
@@ -162,10 +163,12 @@ def _payload_dtype(ty: Any) -> Any:
     return None
 
 
-# this_block ----------------------------------------------------------------
+# this_block and this_warp ----------------------------------------------------
+
+GROUP_FACTORIES = frozenset({"this_block", "this_warp"})
 
 
-def _this_block(function: Callable, qualified_name: str) -> Callable:
+def _this_group(function: Callable, qualified_name: str) -> Callable:
     def generic(self, args, kws):
         if args or kws:
             raise TypedPipelineError(f"{qualified_name}() takes no arguments")
@@ -366,6 +369,7 @@ class LoadStoreRequest:
     def key(self) -> tuple:
         return _request_key(
             self.kind,
+            self.group,
             self.dtype,
             self.items_per_thread,
             self.algorithm,
@@ -381,9 +385,10 @@ class LoadStoreRequest:
 _REQUESTS: dict[tuple, LoadStoreRequest] = {}
 
 
-def _request_key(kind, dtype, items, algorithm, controls) -> tuple:
+def _request_key(kind, group, dtype, items, algorithm, controls) -> tuple:
     return (
         kind,
+        group.key,
         dtype,
         items,
         algorithm,
@@ -401,7 +406,7 @@ def _intern(kind, group, dtype, items, algorithm, controls=()):
     )
     from .._lowering._core import NumbaMlirCoreAdapter
 
-    key = _request_key(kind, dtype, items, algorithm, controls)
+    key = _request_key(kind, group, dtype, items, algorithm, controls)
     request = _REQUESTS.get(key)
     if request is not None:
         return request
@@ -506,6 +511,7 @@ def is_scalar_value(ty: Any) -> bool:
 
 
 _PENDING_EXTENT = object()
+_REFUSED_GROUP = object()
 
 
 def _request(
@@ -521,7 +527,9 @@ def _request(
     Return ``None`` while the payload's dtype is still undefined, so that a
     later typing round retries with the refined payload. A qualified call
     with a plain-array payload has no extent in its types; it returns
-    ``_PENDING_EXTENT`` until site analysis supplies ``extent``.
+    ``_PENDING_EXTENT`` until site analysis supplies ``extent``. A call on
+    a refused group returns ``_REFUSED_GROUP``: it types, so that the
+    group's own error is the one typing reports.
     """
 
     from ..._core.dtype_policy import validate_common_numeric_dtype_name
@@ -533,10 +541,13 @@ def _request(
             "typed pipeline; omit it and the pipeline provides the scratch."
         )
     group = bound.get("group")
-    if not isinstance(group, CoopGroupType) or not group.is_block:
+    if isinstance(group, RefusedGroupType):
+        return _REFUSED_GROUP
+    if not isinstance(group, CoopGroupType):
         raise TypedPipelineError(
-            f"coop.{kind}: the group must be coop.this_block(); {group} is "
-            "not supported on the typed pipeline."
+            f"coop.{kind}: the group must be coop.this_block(), "
+            f"coop.this_warp() or a group_by() of one; {group} is not "
+            "supported on the typed pipeline."
         )
     memory = bound.get(_MEMORY[kind])
     if not isinstance(memory, nb.types.Array):
@@ -612,7 +623,7 @@ def request_for(
 
     _check_memory(kind, _bind_operation(kind, args, kws)[_MEMORY[kind]], loc)
     request = _request(kind, args, kws, qualified=qualified, extent=extent)
-    if request is None or request is _PENDING_EXTENT:
+    if request is None or request in (_PENDING_EXTENT, _REFUSED_GROUP):
         raise AssertionError(f"coop.{kind} reached call resolution untyped")
     return request
 
@@ -723,8 +734,8 @@ _registered = False
 def register() -> None:
     """Register a template for every kernel-callable public object.
 
-    ``this_block``, ``ThreadData``, ``load`` and ``store`` of both APIs are
-    typed; every other primitive is rejected.
+    ``this_block``, ``this_warp``, ``ThreadData``, ``load`` and ``store`` of
+    both APIs are typed; every other primitive is rejected.
     """
 
     global _registered
@@ -734,8 +745,8 @@ def register() -> None:
         short = qualified_name.rsplit(".", 1)[1]
         name = qualified_name.replace(".", "_")
         operation = group_operation(obj)
-        if short == "this_block":
-            register_template(obj, _this_block(obj, qualified_name), name)
+        if short in GROUP_FACTORIES:
+            register_template(obj, _this_group(obj, qualified_name), name)
         elif short == "ThreadData":
             register_template(
                 obj, _thread_data(qualified_name), name, prefer_literal=True
@@ -776,6 +787,7 @@ def register() -> None:
 
 __all__ = [
     "CONTROLS",
+    "GROUP_FACTORIES",
     "OPERATIONS",
     "QUALIFIED_OPERATIONS",
     "WRAPPER_SOURCE",
