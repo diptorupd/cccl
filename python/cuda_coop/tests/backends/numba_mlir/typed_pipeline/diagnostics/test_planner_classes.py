@@ -83,6 +83,18 @@ def runtime_store_value_of_another_dtype(source, output):
     coop.store(coop.this_block(), output, source[cuda.threadIdx.x])
 
 
+_SCALAR_SOURCE_REFUSAL = (
+    r"source must be an array, got float64, whose dtype also conflicts with "
+    r"payload dtype float32"
+)
+
+
+def source_is_a_scalar(source, output):
+    items = coop.ThreadData(4, dtype=types.float32)
+    coop.load(coop.this_block(), 3.0, items)
+    coop.store(coop.this_block(), output, items)
+
+
 def common_unknown_algorithm(source, output):
     items = coop.ThreadData(4)
     coop.load(coop.this_block(), source, items, algorithm="diagonal")
@@ -190,6 +202,12 @@ CASES = [
         (f32, i32),
         MemoryDtypeMismatchError,
         r"value dtype float32 does not match destination dtype int32",
+    ),
+    (
+        source_is_a_scalar,
+        (f32, f32),
+        MemoryDtypeMismatchError,
+        _SCALAR_SOURCE_REFUSAL,
     ),
     (common_unknown_algorithm, (f32, f32), InvalidGroupSelectorError, None),
     (

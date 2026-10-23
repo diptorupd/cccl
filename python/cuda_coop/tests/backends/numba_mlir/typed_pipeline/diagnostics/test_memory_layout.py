@@ -8,7 +8,9 @@ A provider receives only the base address of a ``load`` source or a ``store``
 destination, so coop's planner types the operand as a one-dimensional
 C-contiguous array and rejects any other. The typed pipeline rejects a
 strided view, an argument of any layout and a two-dimensional array after
-typing, naming the operand and the call line.
+typing, naming the operand and the call line. It rejects a scalar operand
+there too, with the planner's dtype mismatch class when the scalar's dtype
+is not the payload's.
 """
 
 from __future__ import annotations
@@ -21,6 +23,9 @@ from numba_cuda_mlir.numba_cuda.core.errors import TypingError
 
 import cuda.coop.numba_mlir as qualified_coop
 from cuda import coop as common_coop
+from cuda.coop.numba_mlir._compiler._group_errors import (
+    MemoryDtypeMismatchError,
+)
 from cuda.coop.numba_mlir._pipeline import testing
 from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
 
@@ -112,6 +117,53 @@ def test_a_memory_operand_must_be_one_dimensional_and_contiguous(
         f"coop.{operation} at line {line}: {operand} must be a "
         f"one-dimensional C-contiguous array, got {got}."
     ) in str(info.value)
+
+
+def _scalar_operand_kernels(coop):
+    def load_from_scalar(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(ITEMS, dtype=types.float32)
+        coop.load(block, source[0], items)
+        coop.store(block, output, items)
+
+    def store_to_scalar(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(ITEMS, dtype=types.float32)
+        coop.load(block, source, items)
+        coop.store(block, output[0], items)
+
+    return {"load": load_from_scalar, "store": store_to_scalar}
+
+
+@pytest.mark.parametrize(
+    "coop", [common_coop, qualified_coop], ids=["common", "qualified"]
+)
+@pytest.mark.parametrize("operation", ["load", "store"])
+@pytest.mark.parametrize(
+    "dtype, mismatch",
+    [(types.float32, False), (types.float64, True)],
+    ids=["payload_dtype", "other_dtype"],
+)
+def test_a_scalar_memory_operand_is_refused_after_typing(
+    coop, operation, dtype, mismatch
+):
+    kernel = _scalar_operand_kernels(coop)[operation]
+    if operation == "load":
+        operand, args = "source", (dtype[::1], CONTIGUOUS)
+    else:
+        operand, args = "destination", (CONTIGUOUS, dtype[::1])
+
+    with pytest.raises(TypedPipelineError) as info:
+        testing.compile_kernel(
+            kernel, types.void(*args), block=BLOCK, chip=CHIP
+        )
+
+    line = _call_line(kernel, operation)
+    assert (
+        f"coop.{operation} at line {line}: {operand} must be an array, "
+        f"got {dtype}"
+    ) in str(info.value)
+    assert isinstance(info.value, MemoryDtypeMismatchError) is mismatch
 
 
 @pytest.mark.parametrize(

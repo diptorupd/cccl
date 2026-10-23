@@ -668,13 +668,34 @@ def _typable(kind: str, bound: dict) -> bool:
             f"coop.{kind}: explicit temp_storage= is not supported on the "
             "typed pipeline; omit it and the pipeline provides the scratch."
         )
-    memory = bound.get(_MEMORY[kind])
-    if not isinstance(memory, nb.types.Array):
-        raise TypedPipelineError(
-            f"coop.{kind}: {_MEMORY[kind]} must be an array, got {memory}"
-        )
     payload = bound.get(_PAYLOAD[kind])
     return not isinstance(payload, nb.types.Array) or payload.dtype.is_precise()
+
+
+def _check_array(kind: str, bound: dict, loc: Any) -> None:
+    """Require an array memory operand.
+
+    Coop's planner types the memory operand's dtype against the payload's,
+    so a scalar of another dtype raises its dtype mismatch.
+    """
+
+    memory = bound.get(_MEMORY[kind])
+    if isinstance(memory, nb.types.Array):
+        return
+    line = "" if loc is None else f" at line {loc.line}"
+    msg = f"coop.{kind}{line}: {_MEMORY[kind]} must be an array, got {memory}"
+    payload = bound.get(_PAYLOAD[kind])
+    dtype = getattr(payload, "dtype", None)
+    if (
+        isinstance(dtype, nb.types.Type)
+        and dtype.is_precise()
+        and dtype != nb.unliteral(memory)
+    ):
+        raise PayloadMemoryDtypeError(
+            f"{msg}, whose dtype also conflicts with payload dtype {dtype}",
+            loc=loc,
+        )
+    raise TypedPipelineError(msg, loc=loc)
 
 
 def _check_memory(kind: str, memory: Any, loc: Any) -> None:
@@ -718,7 +739,9 @@ def request_for(
     not carry. ``loc`` is the kernel location of the public call.
     """
 
-    _check_memory(kind, _bind_operation(kind, args, kws)[_MEMORY[kind]], loc)
+    bound = _bind_operation(kind, args, kws)
+    _check_array(kind, bound, loc)
+    _check_memory(kind, bound[_MEMORY[kind]], loc)
     request = _request(kind, args, kws, qualified=qualified, extent=extent)
     if request is None or request in (_PENDING_EXTENT, _REFUSED_GROUP):
         raise AssertionError(f"coop.{kind} reached call resolution untyped")
