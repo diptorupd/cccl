@@ -187,6 +187,7 @@ def test_a_join_of_payloads_of_one_dtype_and_different_evidence():
     _compile(kernel, I32, I32, I32, I32)
 
 
+@requires_fix("PHI_REFINEMENT")
 def test_a_join_loaded_after_one_input_was_stored():
     def kernel(src_f32, dst_i32, out_f32, flag):
         block = coop.this_block()

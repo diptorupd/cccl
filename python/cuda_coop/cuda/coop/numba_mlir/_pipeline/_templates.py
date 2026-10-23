@@ -48,7 +48,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import _bridges as nb
-from ._errors import TypedPipelineError, unsupported_primitive
+from ._errors import (
+    CommonLoadPayloadError,
+    CommonStorePayloadError,
+    InvalidGroupSelectorError,
+    InvalidLoadStoreAlgorithmError,
+    NonConstantGroupArgumentError,
+    NonConstantThreadGroupError,
+    PayloadMemoryDtypeError,
+    RewriteArgumentError,
+    TypedPipelineError,
+    TypedPipelineTypeError,
+    TypedPipelineValueError,
+    planner_text,
+    typed_error,
+    unsupported_primitive,
+)
 from ._types import (
     EXPLICIT,
     PRODUCER,
@@ -168,10 +183,22 @@ def _payload_dtype(ty: Any) -> Any:
 GROUP_FACTORIES = frozenset({"this_block", "this_warp"})
 
 
+def _bind(function: Callable, args, kws) -> dict:
+    """Bind argument types to a public function's parameters, as Python does.
+
+    A call Python would refuse raises coop's planner's ``TypeError``.
+    """
+
+    try:
+        bound = inspect.signature(function).bind(*args, **kws)
+    except TypeError as exc:
+        raise TypedPipelineTypeError(f"{function.__name__}() {exc}") from None
+    return bound.arguments
+
+
 def _this_group(function: Callable, qualified_name: str) -> Callable:
     def generic(self, args, kws):
-        if args or kws:
-            raise TypedPipelineError(f"{qualified_name}() takes no arguments")
+        _bind(function, args, kws)
         return nb.signature(CoopGroupType(function()))
 
     return generic
@@ -180,25 +207,6 @@ def _this_group(function: Callable, qualified_name: str) -> Callable:
 # ThreadData ----------------------------------------------------------------
 
 _CONSTRUCTOR_PARAMETERS = ("items_per_thread", "dtype", "alignment")
-
-
-def _bind_constructor(qualified_name: str, args, kws) -> dict:
-    if len(args) > 2:
-        raise TypedPipelineError(
-            f"{qualified_name}: alignment is a keyword-only argument"
-        )
-    bound = dict(zip(_CONSTRUCTOR_PARAMETERS, args))
-    for name, ty in kws.items():
-        if name not in _CONSTRUCTOR_PARAMETERS or name in bound:
-            raise TypedPipelineError(
-                f"{qualified_name}: unexpected argument {name!r}"
-            )
-        bound[name] = ty
-    if "items_per_thread" not in bound:
-        raise TypedPipelineError(
-            f"{qualified_name}: items_per_thread is required"
-        )
-    return bound
 
 
 def _fold_constructor_arguments(args, kws) -> tuple:
@@ -215,30 +223,32 @@ def constructor_alignment(qualified_name: str, ty: Any) -> int | None:
     if _omitted(ty):
         return None
     if not isinstance(ty, nb.types.IntegerLiteral):
-        raise TypedPipelineError(
+        raise RewriteArgumentError(
             f"{qualified_name}: alignment must be a compile-time integer"
         )
     try:
         return _normalize_alignment(ty.literal_value)
     except (TypeError, ValueError) as exc:
-        raise TypedPipelineError(f"{qualified_name}: {exc}") from None
+        raise RewriteArgumentError(f"{qualified_name}: {exc}") from None
 
 
-def _thread_data(qualified_name: str) -> Callable:
+def _thread_data(function: Callable, qualified_name: str) -> Callable:
     def generic(self, args, kws):
-        bound = _bind_constructor(qualified_name, args, kws)
+        bound = _bind(function, args, kws)
         items = bound["items_per_thread"]
         if isinstance(items, nb.types.Integer) and not isinstance(
             items, nb.types.IntegerLiteral
         ):
             raise nb.force_literal_arg({0}, _fold_constructor_arguments)
-        if (
-            not isinstance(items, nb.types.IntegerLiteral)
-            or items.literal_value <= 0
-        ):
-            raise TypedPipelineError(
+        if not isinstance(items, nb.types.IntegerLiteral):
+            raise TypedPipelineTypeError(
                 f"{qualified_name}: items_per_thread must be a positive "
                 f"compile-time integer, got {items}"
+            )
+        if items.literal_value <= 0:
+            raise TypedPipelineValueError(
+                f"{qualified_name}: items_per_thread must be a positive "
+                f"integer, got {items.literal_value}"
             )
         alignment = constructor_alignment(
             qualified_name, bound.get("alignment")
@@ -251,7 +261,7 @@ def _thread_data(qualified_name: str) -> Callable:
         else:
             dtype = _payload_dtype(dtype_ty)
             if dtype is None:
-                raise TypedPipelineError(
+                raise TypedPipelineTypeError(
                     f"{qualified_name}: dtype must be a Numba or NumPy "
                     f"scalar type, got {dtype_ty}"
                 )
@@ -423,7 +433,7 @@ def _intern(kind, group, dtype, items, algorithm, controls=()):
             offset=bindings.get("offset", omitted),
         )
     except (TypeError, ValueError) as exc:
-        raise TypedPipelineError(f"coop.{kind}: {exc}") from None
+        raise typed_error(exc, f"coop.{kind}: ") from None
     call = GroupPrimitiveCall(group=group.group, operation=semantics)
     request = _REQUESTS[key] = LoadStoreRequest(
         kind, dtype, items, algorithm, group, tuple(controls), call
@@ -450,51 +460,68 @@ def with_controls(
     )
 
 
-def _algorithm(kind: str, ty: Any) -> str | None:
+def _api(kind: str, qualified: bool) -> str:
+    return f"{_QUALIFIED_PREFIX if qualified else 'cuda.coop.'}{kind}"
+
+
+def _algorithm(kind: str, ty: Any, qualified: bool) -> str:
+    """Return the block algorithm a call's ``algorithm=`` names.
+
+    Raises the error coop's planner raises for the common or the qualified
+    API.
+    """
+
     from ..._core.group.load_store import GroupLoadStoreAlgorithm
+    from .._compiler import _group_errors as planner
 
     if _omitted(ty):
         return "direct"
+    if isinstance(ty, nb.types.UnicodeType):
+        raise NonConstantGroupArgumentError(
+            planner_text(planner.NonConstantGroupArgumentError("algorithm"))
+        )
     if not isinstance(ty, nb.types.StringLiteral):
-        if isinstance(ty, nb.types.UnicodeType):
-            return None
-        raise TypedPipelineError(
-            f"coop.{kind}: algorithm must be a string literal, got {ty}"
+        raise TypedPipelineTypeError(
+            f"{_api(kind, qualified)} algorithm must be a string, got {ty}"
         )
     try:
         return GroupLoadStoreAlgorithm(ty.literal_value).value
     except ValueError:
-        names = ", ".join(repr(a.value) for a in GroupLoadStoreAlgorithm)
-        raise TypedPipelineError(
-            f"coop.{kind}: unknown algorithm {ty.literal_value!r}; "
-            f"use one of {names}"
-        ) from None
+        choices = ", ".join(sorted(a.value for a in GroupLoadStoreAlgorithm))
+        if qualified:
+            exc = planner.InvalidLoadStoreAlgorithmError(kind, choices, "block")
+            raise InvalidLoadStoreAlgorithmError(planner_text(exc)) from None
+        exc = planner.InvalidGroupSelectorError(kind, "algorithm", choices)
+        raise InvalidGroupSelectorError(planner_text(exc)) from None
 
 
-_COMMON_ARRAY_PAYLOAD = {
-    "load": (
-        "cuda.coop.load requires output to be a fixed-size ThreadData "
-        "payload in the common API; use cuda.coop.numba_mlir for "
-        "backend-qualified local-array payload support"
-    ),
-    "store": (
-        "cuda.coop.store accepts only a scalar or fixed-size ThreadData "
-        "value payload in the common API; use cuda.coop.numba_mlir for "
-        "backend-qualified local-array payload support"
-    ),
-}
+def _check_group(kind: str, group: Any) -> None:
+    from .._compiler import _group_errors as planner
+
+    if not isinstance(group, CoopGroupType):
+        raise NonConstantThreadGroupError(
+            planner_text(planner.NonConstantThreadGroupError(kind))
+        )
 
 
 def _check_payload(kind: str, payload: Any, qualified: bool) -> None:
+    from .._compiler import _group_errors as planner
+
     if isinstance(payload, ThreadDataType):
         return
-    if isinstance(payload, nb.types.Array):
-        if qualified:
-            return
-        raise TypedPipelineError(_COMMON_ARRAY_PAYLOAD[kind])
-    raise TypedPipelineError(
-        f"coop.{kind}: {_PAYLOAD[kind]} must be a coop.ThreadData, got "
-        f"{payload}"
+    if isinstance(payload, nb.types.Array) and qualified:
+        return
+    if not qualified:
+        if kind == "load":
+            exc = CommonLoadPayloadError
+            planner_exc = planner.CommonLoadPayloadError()
+        else:
+            exc = CommonStorePayloadError
+            planner_exc = planner.CommonStorePayloadError()
+        raise exc(planner_text(planner_exc))
+    raise TypedPipelineTypeError(
+        f"{_api(kind, qualified)} {_PAYLOAD[kind]} must be a coop.ThreadData "
+        f"or a fixed-size local array, got {payload}"
     )
 
 
@@ -535,19 +562,47 @@ def _request(
     from ..._core.dtype_policy import validate_common_numeric_dtype_name
 
     bound = _bind_operation(kind, args, kws)
+    if not _typable(kind, bound):
+        return None
+    group = bound.get("group")
+    if isinstance(group, RefusedGroupType):
+        return _REFUSED_GROUP
+    _check_group(kind, group)
+    memory = bound.get(_MEMORY[kind])
+    payload = bound.get(_PAYLOAD[kind])
+    if kind == "store" and is_scalar_value(payload):
+        dtype, items = memory.dtype, 1
+    else:
+        _check_payload(kind, payload, qualified)
+        if payload.dtype != memory.dtype:
+            raise PayloadMemoryDtypeError(
+                f"coop.{kind}: payload dtype {payload.dtype} conflicts with "
+                f"{_MEMORY[kind]} dtype {memory.dtype}"
+            )
+        dtype = payload.dtype
+        items = payload.items if isinstance(payload, ThreadDataType) else extent
+    algorithm = _algorithm(kind, bound.get("algorithm"), qualified)
+    try:
+        validate_common_numeric_dtype_name(str(dtype), operation=kind)
+    except TypeError as exc:
+        raise typed_error(exc) from None
+    if items is None:
+        return _PENDING_EXTENT
+    return _intern(kind, group, dtype, items, algorithm)
+
+
+def _typable(kind: str, bound: dict) -> bool:
+    """Whether typing can type a call; refuses what typing cannot type.
+
+    A call types once its payload's dtype is known. Every other check runs
+    in call resolution, after typing, where its error keeps the class coop's
+    planner raises.
+    """
+
     if not _omitted(bound.get("temp_storage")):
         raise TypedPipelineError(
             f"coop.{kind}: explicit temp_storage= is not supported on the "
             "typed pipeline; omit it and the pipeline provides the scratch."
-        )
-    group = bound.get("group")
-    if isinstance(group, RefusedGroupType):
-        return _REFUSED_GROUP
-    if not isinstance(group, CoopGroupType):
-        raise TypedPipelineError(
-            f"coop.{kind}: the group must be coop.this_block(), "
-            f"coop.this_warp() or a group_by() of one; {group} is not "
-            "supported on the typed pipeline."
         )
     memory = bound.get(_MEMORY[kind])
     if not isinstance(memory, nb.types.Array):
@@ -555,29 +610,7 @@ def _request(
             f"coop.{kind}: {_MEMORY[kind]} must be an array, got {memory}"
         )
     payload = bound.get(_PAYLOAD[kind])
-    if kind == "store" and is_scalar_value(payload):
-        dtype, items = memory.dtype, 1
-    else:
-        _check_payload(kind, payload, qualified)
-        if not payload.dtype.is_precise():
-            return None
-        if payload.dtype != memory.dtype:
-            raise TypedPipelineError(
-                f"coop.{kind}: payload dtype {payload.dtype} conflicts with "
-                f"{_MEMORY[kind]} dtype {memory.dtype}"
-            )
-        dtype = payload.dtype
-        items = payload.items if isinstance(payload, ThreadDataType) else extent
-    algorithm = _algorithm(kind, bound.get("algorithm"))
-    if algorithm is None:
-        return None
-    try:
-        validate_common_numeric_dtype_name(str(dtype), operation=kind)
-    except TypeError as exc:
-        raise TypedPipelineError(str(exc)) from None
-    if items is None:
-        return _PENDING_EXTENT
-    return _intern(kind, group, dtype, items, algorithm)
+    return not isinstance(payload, nb.types.Array) or payload.dtype.is_precise()
 
 
 def _check_memory(kind: str, memory: Any, loc: Any) -> None:
@@ -628,9 +661,9 @@ def request_for(
     return request
 
 
-def _operation(kind: str, qualified: bool) -> Callable:
+def _operation(kind: str) -> Callable:
     def generic(self, args, kws):
-        if _request(kind, args, kws, qualified=qualified) is None:
+        if not _typable(kind, _bind_operation(kind, args, kws)):
             return None
         return nb.signature(nb.types.none, *args, *kws.values())
 
@@ -749,7 +782,10 @@ def register() -> None:
             register_template(obj, _this_group(obj, qualified_name), name)
         elif short == "ThreadData":
             register_template(
-                obj, _thread_data(qualified_name), name, prefer_literal=True
+                obj,
+                _thread_data(obj, qualified_name),
+                name,
+                prefer_literal=True,
             )
         elif operation in OPERATIONS.values():
             nb.attach_inline_wrapper(
@@ -763,7 +799,7 @@ def register() -> None:
         qualified = op in QUALIFIED_OPERATIONS
         register_template(
             op,
-            _operation(kind, qualified),
+            _operation(kind),
             f"private_{'qualified_' if qualified else ''}{kind}",
             prefer_literal=True,
         )

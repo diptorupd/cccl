@@ -210,5 +210,7 @@ def test_this_warp_takes_no_arguments():
         coop.this_warp(32)
         output[0] = source[0]
 
-    with pytest.raises(Exception, match=r"this_warp\(\) takes no arguments"):
+    with pytest.raises(
+        Exception, match=r"this_warp\(\) too many positional arguments"
+    ):
         _compile(kernel)

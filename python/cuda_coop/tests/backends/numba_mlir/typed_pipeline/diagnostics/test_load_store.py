@@ -59,7 +59,7 @@ def test_a_group_other_than_the_block_is_refused():
         coop.store(coop.this_block(), output, items)
 
     with pytest.raises(
-        Exception, match=r"coop\.load: the group must be coop\.this_block\(\)"
+        Exception, match=r"load requires a compile-time ThreadGroup from this_"
     ):
         _compile(kernel)
 
@@ -130,7 +130,9 @@ def test_an_unknown_algorithm_lists_the_known_ones():
         coop.store(coop.this_block(), output, items)
 
     with pytest.raises(
-        Exception, match=r"unknown algorithm 'diagonal'; use one of .*direct"
+        Exception,
+        match=r"cuda\.coop\.load algorithm must be one of: direct, striped, "
+        r"transpose, vectorize, warp_transpose, warp_transpose_timesliced",
     ):
         _compile(kernel)
 

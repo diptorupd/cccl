@@ -8,11 +8,17 @@ Every error is a Numba ``TypingError``, so it is reported with the kernel's
 source location like any other typing failure, whether it is raised by a
 typing template or by call resolution after typing. An error that coop's
 planner also reports is an instance of the planner's exception class too.
+
+Numba-CUDA-MLIR reports an error raised inside a typing template as a plain
+``TypingError`` that quotes it, so only an error raised after typing (by a
+check rule or by call resolution) reaches the user with its class. A check
+whose class matters therefore runs after typing where the template can type
+the call without it.
 """
 
 from __future__ import annotations
 
-from .._compiler._group_errors import MemoryDtypeMismatchError
+from .._compiler import _group_errors as planner
 from .._compiler._rewrite_support import CoopSinglePhaseRewriteError
 from . import _bridges as nb
 
@@ -31,17 +37,161 @@ class TypedPipelineError(nb.errors.TypingError):
     """A cooperative construct the typed pipeline rejects."""
 
 
+def _init(self, msg, loc=None):
+    # The planner's class comes first in the bases, and its initializer (or
+    # the builtin one) does not take a location.
+    TypedPipelineError.__init__(self, msg, loc=loc)
+
+
+class TypedPipelineTypeError(TypeError, TypedPipelineError):
+    """An argument coop's planner refuses with a ``TypeError``."""
+
+    __init__ = _init
+
+
+class TypedPipelineValueError(ValueError, TypedPipelineError):
+    """An argument coop's planner refuses with a ``ValueError``."""
+
+    __init__ = _init
+
+
+class TypedPipelineNotImplementedError(NotImplementedError, TypedPipelineError):
+    """A use coop's planner refuses with a ``NotImplementedError``."""
+
+    __init__ = _init
+
+
+class RewriteArgumentError(CoopSinglePhaseRewriteError, TypedPipelineError):
+    """A call argument coop's planner refuses while rewriting the call."""
+
+
 class PayloadJoinDtypeError(CoopSinglePhaseRewriteError, TypedPipelineError):
     """Payloads of different dtypes meet in one variable."""
 
 
-class StoreDtypeMismatchError(MemoryDtypeMismatchError, TypedPipelineError):
+class StoreDtypeMismatchError(
+    planner.MemoryDtypeMismatchError, TypedPipelineError
+):
     """A payload's writes disagree with the destination it is stored to."""
 
-    def __init__(self, msg, loc=None):
-        # MemoryDtypeMismatchError's initializer formats a message of its own
-        # and would skip the one that records the location.
-        TypedPipelineError.__init__(self, msg, loc=loc)
+    __init__ = _init
+
+
+class PayloadMemoryDtypeError(
+    planner.MemoryDtypeMismatchError, TypedPipelineError
+):
+    """A payload, or a scalar ``store`` value, of another dtype than memory."""
+
+    __init__ = _init
+
+
+class CommonLoadPayloadError(
+    planner.CommonLoadPayloadError, TypedPipelineError
+):
+    """A common-API ``load`` output that is not a ``ThreadData``."""
+
+    __init__ = _init
+
+
+class CommonStorePayloadError(
+    planner.CommonStorePayloadError, TypedPipelineError
+):
+    """A common-API ``store`` value that is not a scalar or ``ThreadData``."""
+
+    __init__ = _init
+
+
+class InvalidGroupSelectorError(
+    planner.InvalidGroupSelectorError, TypedPipelineError
+):
+    """A common-API ``algorithm`` outside the supported choices."""
+
+    __init__ = _init
+
+
+class InvalidLoadStoreAlgorithmError(
+    planner.InvalidLoadStoreAlgorithmError, TypedPipelineError
+):
+    """A qualified ``algorithm`` outside the choices for the group kind."""
+
+    __init__ = _init
+
+
+class DefaultDtypeMismatchError(
+    planner.DefaultDtypeMismatchError, TypedPipelineError
+):
+    """A runtime ``oob_default`` of another dtype than the payload."""
+
+    __init__ = _init
+
+
+class NonConstantGroupArgumentError(
+    planner.NonConstantGroupArgumentError, TypedPipelineError
+):
+    """A control that shapes the provider is not a compile-time constant."""
+
+    __init__ = _init
+
+
+class NonConstantThreadGroupError(
+    planner.NonConstantThreadGroupError, TypedPipelineError
+):
+    """A group operand that is not a ``this_*()`` group."""
+
+    __init__ = _init
+
+
+class UnknownLoadStoreExtentError(
+    planner.UnknownLoadStoreExtentError, TypedPipelineError
+):
+    """A payload whose extent is not known at compile time."""
+
+    __init__ = _init
+
+
+class InconsistentLoopPayloadExtentError(
+    planner.InconsistentLoopPayloadExtentError, TypedPipelineError
+):
+    """Payload aliases with different extents."""
+
+    __init__ = _init
+
+
+# Checked in order: a planner class before the builtin class it derives from.
+_TYPED_CLASSES = (
+    (planner.MemoryDtypeMismatchError, PayloadMemoryDtypeError),
+    (planner.DefaultDtypeMismatchError, DefaultDtypeMismatchError),
+    (CoopSinglePhaseRewriteError, RewriteArgumentError),
+    (NotImplementedError, TypedPipelineNotImplementedError),
+    (TypeError, TypedPipelineTypeError),
+    (ValueError, TypedPipelineValueError),
+)
+
+
+def planner_text(exc: Exception) -> str:
+    """The message of a planner exception, on one line.
+
+    The planner wraps its diagnostics at 80 columns; the typed pipeline
+    reports them as one line, as its own.
+    """
+
+    return " ".join(str(exc).split())
+
+
+def typed_error(
+    exc: Exception, prefix: str = "", loc=None
+) -> TypedPipelineError:
+    """Return ``exc``, raised by coop's shared code, as a typed error.
+
+    The result has the class coop's planner raises for ``exc``, and
+    ``exc``'s message after ``prefix``.
+    """
+
+    msg = prefix + planner_text(exc)
+    for planner_class, typed_class in _TYPED_CLASSES:
+        if isinstance(exc, planner_class):
+            return typed_class(msg, loc=loc)
+    return TypedPipelineError(msg, loc=loc)
 
 
 class SharedMemoryAliasError(CoopSinglePhaseRewriteError, TypedPipelineError):
@@ -61,9 +211,25 @@ def unsupported_primitive(qualified_name: str) -> TypedPipelineError:
 __all__ = [
     "MODE_HINT",
     "SUPPORTED_SURFACE",
+    "CommonLoadPayloadError",
+    "CommonStorePayloadError",
+    "DefaultDtypeMismatchError",
+    "InconsistentLoopPayloadExtentError",
+    "InvalidGroupSelectorError",
+    "InvalidLoadStoreAlgorithmError",
+    "NonConstantGroupArgumentError",
+    "NonConstantThreadGroupError",
     "PayloadJoinDtypeError",
+    "PayloadMemoryDtypeError",
+    "RewriteArgumentError",
     "SharedMemoryAliasError",
     "StoreDtypeMismatchError",
     "TypedPipelineError",
+    "TypedPipelineNotImplementedError",
+    "TypedPipelineTypeError",
+    "TypedPipelineValueError",
+    "UnknownLoadStoreExtentError",
+    "planner_text",
+    "typed_error",
     "unsupported_primitive",
 ]

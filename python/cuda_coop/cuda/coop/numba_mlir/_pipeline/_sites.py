@@ -36,7 +36,17 @@ from numbers import Integral
 from typing import Any
 
 from . import _bridges as nb
-from ._errors import PayloadJoinDtypeError, TypedPipelineError
+from ._errors import (
+    DefaultDtypeMismatchError,
+    InconsistentLoopPayloadExtentError,
+    PayloadJoinDtypeError,
+    PayloadMemoryDtypeError,
+    TypedPipelineError,
+    TypedPipelineTypeError,
+    TypedPipelineValueError,
+    UnknownLoadStoreExtentError,
+    typed_error,
+)
 from ._templates import (
     CONTROLS,
     OPERATIONS,
@@ -358,9 +368,9 @@ class _Analysis:
             elif scalar.value is not None:
                 found[name] = (scalar, None)
 
-        def check(condition: bool, message: str) -> None:
+        def check(condition: bool, error: type, message: str) -> None:
             if condition:
-                raise TypedPipelineError(message)
+                raise error(message)
 
         for name in ("valid_items", "offset"):
             scalar, _ = found.get(name, (None, None))
@@ -369,15 +379,18 @@ class _Analysis:
             value = scalar.value
             check(
                 isinstance(value, bool) or not isinstance(value, Integral),
+                TypedPipelineTypeError,
                 f"coop {kind} {name} must be an integer",
             )
             if name == "offset":
                 check(
                     int(value) < 0,
+                    TypedPipelineValueError,
                     "coop load/store static offset must be nonnegative",
                 )
                 check(
                     int(value) > (1 << 63) - 1,
+                    TypedPipelineValueError,
                     "coop load/store static offset must fit a signed 64-bit "
                     "integer",
                 )
@@ -389,7 +402,7 @@ class _Analysis:
                         ty, operation=kind, parameter=name
                     )
                 except TypeError as exc:
-                    raise TypedPipelineError(str(exc)) from None
+                    raise typed_error(exc) from None
 
         controls = []
         for name in CONTROLS[kind]:
@@ -403,9 +416,10 @@ class _Analysis:
                             ty, operation="load", parameter="oob_default"
                         )
                     except (TypeError, ValueError) as exc:
-                        raise TypedPipelineError(str(exc)) from None
+                        raise typed_error(exc) from None
                     check(
                         ty != dtype,
+                        DefaultDtypeMismatchError,
                         "cuda.coop.numba_mlir.load runtime oob_default dtype "
                         f"{ty} does not match payload dtype {dtype}",
                     )
@@ -422,7 +436,7 @@ class _Analysis:
                         source_dtype=scalar.dtype,
                     )
                 except (TypeError, ValueError) as exc:
-                    raise TypedPipelineError(str(exc)) from None
+                    raise typed_error(exc) from None
             controls.append((name, ArgumentBinding.static(value)))
         return tuple(controls)
 
@@ -445,9 +459,10 @@ class _Analysis:
         if scalar is _RUNTIME or scalar.value is None:
             actual = getattr(ty, "literal_type", ty)
             if actual != dtype:
-                raise TypedPipelineError(
+                raise PayloadMemoryDtypeError(
                     f"cuda.coop.numba_mlir.store value dtype {actual} does "
-                    f"not match destination dtype {dtype}"
+                    f"not match destination dtype {dtype}, which is the "
+                    "payload dtype of a scalar store"
                 )
             return Scalar(None)
         try:
@@ -459,7 +474,7 @@ class _Analysis:
                 source_dtype=scalar.dtype,
             )
         except (TypeError, ValueError) as exc:
-            raise TypedPipelineError(str(exc)) from None
+            raise typed_error(exc) from None
         return Scalar(value)
 
     def _array_extent(self, stmt, kind: str) -> int | None:
@@ -494,12 +509,12 @@ class _Analysis:
                 else:
                     extents.add(self._local_array_extent(definition))
         if None in extents or not extents:
-            raise TypedPipelineError(
+            raise UnknownLoadStoreExtentError(
                 f"cuda.coop.numba_mlir.{kind} requires a static "
                 "items_per_thread extent before provider selection"
             )
         if len(extents) > 1:
-            raise TypedPipelineError(
+            raise InconsistentLoopPayloadExtentError(
                 "cuda.coop.numba_mlir loop-carried payloads have "
                 "inconsistent items_per_thread extents"
             )

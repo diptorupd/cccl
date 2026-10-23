@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._errors import MODE_HINT, TypedPipelineError
+from ._errors import MODE_HINT, TypedPipelineError, planner_text, typed_error
 from ._groups import UnsupportedGroupError, WarpLoadStoreUnsupportedError
 from ._sites import Sites
 from ._templates import LoadStoreRequest
@@ -78,6 +78,7 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
     from ..._core.group._dispatch import plan_group_primitive
     from ..._core.group._model import GroupLoweringTarget, StorageOwnership
     from ..._core.launch import LaunchFacts
+    from .._compiler import _group_errors as planner
     from .._lowering import _load_store
     from .._lowering._core import NumbaMlirCoreAdapter
 
@@ -86,9 +87,10 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
             request.call, LaunchFacts(exact_block_dim=block)
         ).require_supported()
     except NotImplementedError as exc:
-        raise UnsupportedGroupError(f"coop.{request.kind}: {exc}") from None
+        reason = planner.UnsupportedLoadStoreGroupError(request.kind, str(exc))
+        raise UnsupportedGroupError(planner_text(reason)) from None
     except (TypeError, ValueError) as exc:
-        raise TypedPipelineError(f"coop.{request.kind}: {exc}") from None
+        raise typed_error(exc, f"coop.{request.kind}: ") from None
     storage_free = plan.temp_storage.ownership is StorageOwnership.NONE
     if plan.target is GroupLoweringTarget.CUB_BLOCK:
         prefix, group_kwargs = "", {}
