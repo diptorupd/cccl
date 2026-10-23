@@ -843,10 +843,11 @@ def make_wrapper(
 ) -> Callable:
     """Generate the inline wrapper of a public ``load`` or ``store`` object.
 
-    The wrapper has the public object's parameters, with keyword-only ones
-    relaxed to ordinary parameters: Numba's inliner cannot bind keyword-only
-    parameters. The private operation still receives them by
-    keyword.
+    The wrapper has the public object's parameters and name, so a call that
+    does not bind fails as the same call to the public object does, except
+    that keyword-only parameters are relaxed to ordinary parameters:
+    Numba's inliner cannot bind keyword-only parameters. The private
+    operation still receives them by keyword.
     """
 
     params = list(inspect.signature(public).parameters.values())
@@ -886,7 +887,10 @@ def make_wrapper(
     namespace = {"_never": _never, op.__name__: op}
     exec(compile(source, filename, "exec"), namespace)  # noqa: S102
     WRAPPER_SOURCE[qualified_name] = source
-    return namespace[name]
+    wrapper = namespace[name]
+    # Not __qualname__: inlined variables are named after it.
+    wrapper.__name__ = public.__name__
+    return wrapper
 
 
 # Registration ----------------------------------------------------------------
