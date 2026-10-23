@@ -192,16 +192,31 @@ def test_oob_default_is_only_for_load():
         _compile(kernel)
 
 
-def test_a_runtime_scalar_store_value_must_match_the_destination():
-    def kernel(source, output, value):
-        coop.store(coop.this_block(), output, value)
+@pytest.mark.parametrize("group", ["block", "warp"])
+def test_a_runtime_scalar_store_value_must_match_the_destination(group):
+    from cuda.coop.numba_mlir._compiler._group_errors import (
+        MemoryDtypeMismatchError,
+    )
+
+    if group == "block":
+
+        def kernel(source, output, value):
+            coop.store(coop.this_block(), output, value)
+
+    else:
+
+        def kernel(source, output, value):
+            coop.store(coop.this_warp(), output, value)
 
     with pytest.raises(
         TypedPipelineError,
         match=r"cuda\.coop\.numba_mlir\.store value dtype float64 does not "
-        r"match destination dtype float32",
-    ):
+        r"match destination dtype float32 \(memory dtype float32 does not "
+        r"match payload dtype float64\)",
+    ) as info:
         _compile(kernel, types.float64)
+    assert isinstance(info.value, MemoryDtypeMismatchError)
+    assert isinstance(info.value, TypeError)
 
 
 def test_a_static_scalar_store_value_must_fit_the_destination():

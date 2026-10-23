@@ -451,6 +451,10 @@ class _Analysis:
 
         A static value converts to the destination's dtype under coop's
         scalar rules; a runtime value must already have that dtype exactly.
+        The planner reports a runtime value of the wrong dtype as a
+        ``MemoryDtypeMismatchError`` when it can type the value before
+        Numba does (``x + 1``) and as a ``TypingError`` when only Numba can
+        (``abs(x)``); here it is both.
         """
 
         from .._compiler._parameters import coerce_static_scalar
@@ -467,8 +471,9 @@ class _Analysis:
             if actual != dtype:
                 raise PayloadMemoryDtypeError(
                     f"cuda.coop.numba_mlir.store value dtype {actual} does "
-                    f"not match destination dtype {dtype}, which is the "
-                    "payload dtype of a scalar store"
+                    f"not match destination dtype {dtype} (memory dtype "
+                    f"{dtype} does not match payload dtype {actual}); store "
+                    "does not convert it"
                 )
             return Scalar(None)
         try:
