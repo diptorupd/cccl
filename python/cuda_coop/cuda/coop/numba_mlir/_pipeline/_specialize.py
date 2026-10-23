@@ -36,6 +36,7 @@ from ._errors import (
     MODE_HINT,
     InvalidLoadStoreAlgorithmError,
     TypedPipelineError,
+    TypedPipelineValueError,
     planner_text,
     typed_error,
 )
@@ -145,6 +146,12 @@ def _complete(request: LoadStoreRequest, block: tuple) -> Completion:
             request.group.kind,
         )
         raise InvalidLoadStoreAlgorithmError(planner_text(reason))
+    if request.group.is_warp and request.storage is not None:
+        raise TypedPipelineValueError(
+            f"cuda.coop.numba_mlir.{request.kind} temp_storage is not "
+            "supported for Warp groups; omit it so the implementation can "
+            "provide per-group storage"
+        )
     try:
         plan = plan_group_primitive(
             request.call, LaunchFacts(exact_block_dim=block)

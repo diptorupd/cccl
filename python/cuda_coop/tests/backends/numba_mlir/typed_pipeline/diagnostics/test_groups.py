@@ -220,6 +220,30 @@ def test_a_transpose_is_refused_even_next_to_a_warp_site_without_scratch():
         _compile(kernel)
 
 
+@pytest.mark.parametrize("width", [None, 8])
+@pytest.mark.parametrize("algorithm", ["direct", "transpose"])
+def test_temp_storage_on_a_warp_group_is_refused_as_the_planner_does(
+    width, algorithm
+):
+    def kernel(source, output):
+        warp = coop.this_warp()
+        group = warp if width is None else warp.group_by(width)
+        storage = coop.TempStorage()
+        items = coop.ThreadData(4)
+        coop.load(
+            group, source, items, algorithm=algorithm, temp_storage=storage
+        )
+        coop.store(group, output, items)
+
+    with _raises(
+        ValueError,
+        r"cuda\.coop\.numba_mlir\.load temp_storage is not supported for "
+        r"Warp groups",
+    ) as info:
+        _compile(kernel)
+    _check_class(info, ValueError)
+
+
 def test_this_warp_takes_no_arguments():
     def kernel(source, output):
         coop.this_warp(32)
