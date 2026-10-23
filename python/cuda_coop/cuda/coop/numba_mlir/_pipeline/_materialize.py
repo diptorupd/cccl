@@ -32,7 +32,7 @@ from ._lower import SCRATCH_KEYWORD
 from ._plan import KernelPlan
 from ._sites import Site
 from ._specialize import GroupTile, Specialization
-from ._storage import StorageLayout
+from ._storage import Slice, StorageLayout
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,9 @@ class CallEntry:
 
     ``("scratch",)``
         the scratch region's pointer;
+    ``("scratch", width, stride, block)``
+        the scratch pointer of the thread's group instance, ``(rank //
+        width) * stride`` bytes into the region;
     ``("pointer", index)``
         the data pointer of the call's argument ``index``;
     ``("box", index, dtype, value)``
@@ -54,6 +57,9 @@ class CallEntry:
         the origin of the thread's group tile, ``(rank // width) * items``
         for the x-major rank of the thread in ``block``, plus ``base``: an
         integer, or a ``("value", keyword)`` operand.
+
+    ``barrier_group`` is ``(width, block)`` when the barrier after the call
+    synchronizes the thread's warp group rather than the block.
     """
 
     symbol: str
@@ -61,6 +67,7 @@ class CallEntry:
     operands: tuple
     barrier_after: bool
     link_items: tuple
+    barrier_group: tuple | None = None
 
 
 @dataclass
@@ -124,11 +131,12 @@ def _runtime_operands(site: Site, tile: GroupTile | None, block) -> list:
     return runtime
 
 
-def _operands(method: Any, site: Site, algorithm: Any, scratch: bool, runtime):
+def _operands(method: Any, site: Site, algorithm: Any, scratch, runtime):
     """Pair each provider operand with where lowering finds its value.
 
-    Coop's providers take the scratch pointer, the memory pointer, the
-    payload, then the ``runtime`` operands.
+    Coop's providers take the ``scratch`` pointer operand when it is not
+    ``None``, the memory pointer, the payload, then the ``runtime``
+    operands.
     """
 
     from .. import _types as coop_types
@@ -143,7 +151,9 @@ def _operands(method: Any, site: Site, algorithm: Any, scratch: bool, runtime):
         if site.scalar is None
         else ("box", 2, site.request.dtype, site.scalar.value)
     )
-    pointers = [("scratch",)] * scratch + [("pointer", 1), payload]
+    pointers = [("pointer", 1), payload]
+    if scratch is not None:
+        pointers.insert(0, scratch)
     runtime = list(runtime)
     abi_arguments, operands = [], []
     for parameter in _inputs(method):
@@ -161,14 +171,19 @@ def _operands(method: Any, site: Site, algorithm: Any, scratch: bool, runtime):
 def _call_entry(
     site: Site,
     algorithm: Any,
-    scratch: bool,
+    slice_: Slice | None,
     barrier: bool,
     tile: GroupTile | None,
     block: tuple,
     bundle: Bundle,
 ) -> CallEntry:
     runtime = _runtime_operands(site, tile, block)
-    method = _select_method(algorithm, 2 + scratch + len(runtime))
+    scratch = None
+    if slice_ is not None:
+        scratch = ("scratch",)
+        if slice_.stride:
+            scratch = ("scratch", tile.width, slice_.stride, block)
+    method = _select_method(algorithm, 2 + (scratch is not None) + len(runtime))
     abi_arguments, operands = _operands(
         method, site, algorithm, scratch, runtime
     )
@@ -178,6 +193,7 @@ def _call_entry(
         operands=operands,
         barrier_after=barrier,
         link_items=(bundle.link_item,),
+        barrier_group=None if tile is None else (tile.width, block),
     )
 
 
@@ -294,16 +310,16 @@ def materialize(
         site.stmt.target.name: _call_entry(
             site,
             algorithm,
-            scratch,
+            slice_,
             barrier,
             tile,
             specialization.block,
             bundle,
         )
-        for site, algorithm, scratch, barrier, tile in zip(
+        for site, algorithm, slice_, barrier, tile in zip(
             sites,
             specialization.site_algorithms,
-            storage.scratch,
+            storage.slices,
             specialization.barrier_after,
             specialization.tiles,
             strict=True,

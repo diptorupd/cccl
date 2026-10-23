@@ -86,10 +86,6 @@ class UnsupportedGroupError(UnsupportedLoadStoreGroupError, TypedPipelineError):
     __init__ = _init
 
 
-class WarpLoadStoreUnsupportedError(UnsupportedGroupError):
-    """A warp load or store the typed pipeline lacks: one that needs scratch."""
-
-
 _DESCRIPTOR_ERRORS = (
     (NotImplementedError, GroupByNotImplementedError),
     (TypeError, GroupByTypeError),
@@ -245,7 +241,6 @@ __all__ = [
     "GroupByValueError",
     "NonConstantGroupByArgumentError",
     "UnsupportedGroupError",
-    "WarpLoadStoreUnsupportedError",
     "partition",
     "refused_groups",
     "register",

@@ -5,9 +5,7 @@
 """What the typed pipeline refuses for warp groups and ``group_by``.
 
 Each refusal is raised with the class coop's planner raises, which is also
-a ``TypedPipelineError``. A ``group_by`` refusal points at the call; a load
-or store on a warp group that needs scratch (``transpose``) is refused
-until the typed pipeline lays out per-warp scratch.
+a ``TypedPipelineError``. A ``group_by`` refusal points at the call.
 """
 
 from __future__ import annotations
@@ -27,16 +25,12 @@ from cuda.coop.numba_mlir._compiler._group_planner_support import (
 )
 from cuda.coop.numba_mlir._pipeline import testing
 from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
-from cuda.coop.numba_mlir._pipeline._groups import (
-    WarpLoadStoreUnsupportedError,
-)
 
 from .._support import CHIP, f32_in_out, requires_typed_pipeline
 
 pytestmark = requires_typed_pipeline
 
 WARP_BLOCK = (64, 1, 1)
-NOT_YET = "needs scratch storage, not supported on the typed pipeline yet"
 
 
 def _compile(kernel, block=WARP_BLOCK):
@@ -192,21 +186,14 @@ def test_a_warp_group_needs_a_block_of_complete_warps(width):
 
 
 @pytest.mark.parametrize("api", _APIS)
-@pytest.mark.parametrize("width", [None, 8, 16])
+@pytest.mark.parametrize("width", [None, 8])
 @pytest.mark.parametrize("kind", ["load", "store"])
-def test_a_warp_transpose_is_refused_by_name(api, width, kind):
-    group = (
-        r"coop\.group\[warp\]"
-        if width is None
-        else rf"coop\.group\[threads_within_warp, {width}\]"
-    )
+def test_a_warp_transpose_needs_a_block_of_complete_warps(api, width, kind):
     with _raises(
-        WarpLoadStoreUnsupportedError,
-        rf"coop\.{kind} at line \d+ on {group}: warp transpose",
+        UnsupportedLoadStoreGroupError, "complete 32-thread warps"
     ) as info:
-        _compile(_warp_kernel(api, width, kind, "transpose"))
-    _check_class(info, UnsupportedLoadStoreGroupError, NotImplementedError)
-    assert NOT_YET in str(info.value)
+        _compile(_warp_kernel(api, width, kind, "transpose"), block=(48, 1, 1))
+    _check_class(info, UnsupportedLoadStoreGroupError)
 
 
 @pytest.mark.parametrize(
@@ -223,16 +210,6 @@ def test_a_block_only_algorithm_on_a_warp_is_refused_as_the_planner_does(
     ) as info:
         _compile(_warp_kernel(coop, width, "load", algorithm))
     _check_class(info, InvalidLoadStoreAlgorithmError, ValueError)
-
-
-def test_a_transpose_is_refused_even_next_to_a_warp_site_without_scratch():
-    def kernel(source, output):
-        items = coop.ThreadData(4)
-        coop.load(coop.this_warp(), source, items)
-        coop.store(coop.this_warp(), output, items, algorithm="transpose")
-
-    with _raises(WarpLoadStoreUnsupportedError, "coop.store at line"):
-        _compile(kernel)
 
 
 @pytest.mark.parametrize("width", [None, 8])

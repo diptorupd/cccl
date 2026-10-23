@@ -20,8 +20,10 @@ was decided by call resolution and stored in
   payload pointers, then the runtime controls converted to their ABI
   types, followed by a ``gpu.barrier`` when the plan has one. A scalar
   ``store`` value is boxed into a one-item array first. On a warp group
-  the offset is the group tile's origin, computed from the thread index
-  as the plan describes it.
+  the offset is the group tile's origin and the scratch pointer the
+  group instance's slot, both computed from the thread index as the plan
+  describes them, and the barrier is a ``syncwarp`` over the group's
+  lanes.
 """
 
 from __future__ import annotations
@@ -122,12 +124,12 @@ def _keyword_value(builder, var, abi_type):
     )
 
 
-def _tile_offset(builder, operand, abi_type, keywords):
-    _, width, items, block, base = operand
-    index = nb.mlir_ir.IndexType.get()
+def _index(value):
+    return nb.arith.constant(nb.mlir_ir.IndexType.get(), value)
 
-    def constant(value):
-        return nb.arith.constant(index, value)
+
+def _linear_rank(block):
+    """The x-major rank of the thread in ``block``, as an ``index``."""
 
     def thread_id(axis):
         return nb.gpu.thread_id(getattr(nb.gpu.Dimension, axis))
@@ -135,12 +137,19 @@ def _tile_offset(builder, operand, abi_type, keywords):
     rank = thread_id("x")
     if block[1] > 1 or block[2] > 1:
         yz = nb.arith.addi(
-            thread_id("y"), nb.arith.muli(constant(block[1]), thread_id("z"))
+            thread_id("y"), nb.arith.muli(_index(block[1]), thread_id("z"))
         )
-        rank = nb.arith.addi(rank, nb.arith.muli(constant(block[0]), yz))
-    origin = nb.arith.muli(
-        nb.arith.divui(rank, constant(width)), constant(items)
-    )
+        rank = nb.arith.addi(rank, nb.arith.muli(_index(block[0]), yz))
+    return rank
+
+
+def _instance(width, block):
+    return nb.arith.divui(_linear_rank(block), _index(width))
+
+
+def _tile_offset(builder, operand, abi_type, keywords):
+    _, width, items, block, base = operand
+    origin = nb.arith.muli(_instance(width, block), _index(items))
     origin = nb.arith.index_cast(builder.get_mlir_type(abi_type), origin)
     if base == 0:
         return origin
@@ -156,15 +165,33 @@ def _operand(builder, operand, abi_type, args, keywords):
     if tag == "tile_offset":
         return _tile_offset(builder, operand, abi_type, keywords)
     if tag == "scratch":
-        return nb.memref_data_pointer(
+        pointer = nb.memref_data_pointer(
             builder.load_var(keywords[SCRATCH_KEYWORD])
         )
+        if len(operand) == 1:
+            return pointer
+        _, width, stride, block = operand
+        offset = nb.arith.muli(_instance(width, block), _index(stride))
+        offset = nb.arith.index_cast(nb.mlir_types.i64(), offset)
+        return nb.llvm_ptr_add_bytes(pointer, offset)
     if tag == "pointer":
         return nb.memref_data_pointer(builder.load_var(args[operand[1]]))
     if tag == "box":
         _, index, dtype, value = operand
         return nb.memref_data_pointer(_box(builder, args[index], dtype, value))
     return _keyword_value(builder, keywords[operand[1]], abi_type)
+
+
+def _warp_mask(width, block):
+    """The ``syncwarp`` mask of the thread's group: its lanes in the warp."""
+
+    i32 = nb.mlir_types.i32()
+    if width >= 32:
+        return nb.arith.constant(i32, -1)
+    lane = nb.arith.andi(_linear_rank(block), _index(31))
+    shift = nb.arith.muli(nb.arith.divui(lane, _index(width)), _index(width))
+    shift = nb.arith.index_cast(i32, shift)
+    return nb.arith.shli(nb.arith.constant(i32, (1 << width) - 1), shift)
 
 
 def _lower_operation(builder, target, args, kwargs):
@@ -191,8 +218,10 @@ def _lower_operation(builder, target, args, kwargs):
         callee=callee.name.value,
         operands_=[result, *operands],
     )
-    if entry.barrier_after:
+    if entry.barrier_after and entry.barrier_group is None:
         nb.gpu.barrier()
+    elif entry.barrier_after:
+        nb.nvvm.bar_warp_sync(_warp_mask(*entry.barrier_group))
     for item in entry.link_items:
         builder.link_external_item(item)
 

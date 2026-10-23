@@ -16,10 +16,9 @@ the checked sites and the launch's block it:
   barrier: every site with implicit scratch, and the sites of a
   ``TempStorage`` with ``auto_sync=True``, as coop's planner does;
 * records, for each site on a warp group, where its group's tile starts,
-  which coop's planner leaves to the backend.
-
-A warp site whose provider needs scratch is refused: the typed pipeline
-does not lay out per-warp scratch yet.
+  which coop's planner leaves to the backend. A warp site's scratch and
+  barrier are its group's: one slot per warp of the block, and a
+  ``syncwarp`` over the group's lanes.
 
 Specializing generates provider source and nothing more: this stage does
 not call NVRTC, so scratch use is decided before any size is known. It does
@@ -33,14 +32,13 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from ._errors import (
-    MODE_HINT,
     InvalidLoadStoreAlgorithmError,
     TypedPipelineError,
     TypedPipelineValueError,
     planner_text,
     typed_error,
 )
-from ._groups import UnsupportedGroupError, WarpLoadStoreUnsupportedError
+from ._groups import UnsupportedGroupError
 from ._sites import Sites
 from ._templates import LoadStoreRequest
 
@@ -314,20 +312,11 @@ def specialize(
     """Specialize every site's provider for ``block`` and plan around them.
 
     Every request is completed first, so that coop's planning checks the
-    groups against the block, before a warp site that needs scratch is
-    refused.
+    groups against the block before any provider is specialized.
     """
 
     unique = list(dict.fromkeys(s.request for s in sites.sites))
     completions = {request: _complete(request, block) for request in unique}
-    for site in sites.sites:
-        if site.request.group.is_warp and completions[site.request].scratch:
-            raise WarpLoadStoreUnsupportedError(
-                f"coop.{site.kind} at line {site.line} on "
-                f"{site.request.group}: warp {site.request.algorithm} needs "
-                "scratch storage, not supported on the typed pipeline yet. "
-                f"{MODE_HINT}"
-            )
     algorithms = _instantiate(unique, block, target)
     algorithm_for = dict(zip(unique, algorithms))
     return plan(

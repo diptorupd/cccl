@@ -30,7 +30,7 @@ MODE_HINT = (
 
 SUPPORTED_SURFACE = (
     "this_block(), this_warp(), group_by(), ThreadData, TempStorage, and load "
-    "and store on a block group or, without scratch, on a warp group"
+    "and store on a block or warp group"
 )
 
 

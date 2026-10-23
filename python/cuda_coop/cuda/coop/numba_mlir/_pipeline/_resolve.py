@@ -82,7 +82,9 @@ def _site_plan(index, site, block, slice_, barrier_after, tile) -> SitePlan:
         ),
         region=None if slice_ is None else slice_.region,
         region_offset=0 if slice_ is None else slice_.region_offset,
+        region_stride=0 if slice_ is None else slice_.stride,
         barrier_after=barrier_after,
+        barrier_scope="block" if tile is None else "warp",
     )
 
 

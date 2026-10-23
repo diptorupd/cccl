@@ -28,8 +28,8 @@ context, so activation only registers, and the probes and patches run at
 the first compile, before it types anything (``_prepare``). The supported
 surface is ``this_block()``, ``this_warp()`` and their ``group_by()``
 partitions (``_groups``), ``ThreadData``, and ``load`` and ``store`` on a
-block group, or on a warp group with an algorithm that needs no scratch;
-any other cooperative call is a typing error, never a fallback.
+block or warp group; any other cooperative call is a typing error, never a
+fallback.
 """
 
 from __future__ import annotations

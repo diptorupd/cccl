@@ -47,7 +47,10 @@ class SitePlan:
 
     ``request`` holds the completed specialization's parameters in the
     order they are printed, for example ``(("algorithm", "transpose"),)``.
-    ``region_offset`` is where the site's scratch starts in ``region``.
+    ``region_offset`` is where the site's scratch starts in ``region``;
+    with a ``region_stride``, each group instance's slot follows the last.
+    ``barrier_scope`` is ``"warp"`` when the barrier after the site is a
+    ``syncwarp`` over its group's lanes.
     """
 
     index: int
@@ -56,8 +59,10 @@ class SitePlan:
     request: tuple[tuple[str, object], ...] = ()
     region: str | None = None
     region_offset: int = 0
+    region_stride: int = 0
     barrier_before: bool = False
     barrier_after: bool = False
+    barrier_scope: str = "block"
 
 
 @dataclass
@@ -88,6 +93,8 @@ def _site_line(site: SitePlan) -> str:
         text += f" region={site.region}"
         if site.region_offset:
             text += f"+{site.region_offset}"
+        if site.region_stride:
+            text += f" stride={site.region_stride}"
     return text
 
 
@@ -120,8 +127,10 @@ def format_plan(plan: KernelPlan) -> str:
         if site.barrier_before:
             lines.append(f"  barrier before #{site.index}")
         lines.append(f"  {_site_line(site)}")
-        if site.barrier_after:
+        if site.barrier_after and site.barrier_scope == "block":
             lines.append(f"  barrier after #{site.index}")
+        elif site.barrier_after:
+            lines.append(f"  barrier after #{site.index} {site.barrier_scope}")
     return "\n".join(lines) + "\n"
 
 

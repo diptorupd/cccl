@@ -7,9 +7,10 @@
 Each warp group moves its own tile of ``width * items`` elements; the group
 of the thread with x-major rank ``r`` starts at ``(r // width) * width *
 items``. Results are checked against NumPy's view of that arrangement:
-blocked for ``direct`` and ``vectorize``, striped within the group for
-``striped``. Only the algorithms that need no scratch are covered; a warp
-``transpose`` is refused (``diagnostics/test_groups.py``).
+blocked for ``direct``, ``vectorize`` and ``transpose``, striped within the
+group for ``striped``. A ``transpose`` exchanges through its group
+instance's slot of the scratch, so the last tests run several in one kernel,
+next to other groups' and the block's.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ pytestmark = requires_typed_pipeline
 
 THREADS = 64
 ITEMS = 4
-ALGORITHMS = ("direct", "striped", "vectorize")
+ALGORITHMS = ("direct", "striped", "vectorize", "transpose")
 PHYSICAL = None
 WIDTHS = [PHYSICAL, 1, 2, 4, 8, 16, 32]
 
@@ -360,3 +361,101 @@ def test_logical_warps_of_different_widths_in_one_kernel():
     expected = np.zeros_like(source)
     expected[_positions(16, "striped")] = source[_positions(4, "direct")]
     np.testing.assert_array_equal(d_out.copy_to_host(), expected)
+
+
+@pytest.mark.parametrize("width", [PHYSICAL, 8], ids=_width_id)
+def test_a_transpose_reuses_its_scratch_across_iterations(width):
+    coop = coop_common
+    rounds = 3
+    tile = THREADS * ITEMS
+    if width is PHYSICAL:
+
+        @cuda.jit
+        def kernel(source, output):
+            items = coop.ThreadData(ITEMS, dtype=source.dtype)
+            group = coop.this_warp()
+            for r in range(rounds):
+                coop.load(
+                    group, source, items, algorithm="transpose", offset=r * tile
+                )
+                for i in range(ITEMS):
+                    items[i] = items[i] + r
+                coop.store(
+                    group, output, items, algorithm="transpose", offset=r * tile
+                )
+
+    else:
+
+        @cuda.jit
+        def kernel(source, output):
+            items = coop.ThreadData(ITEMS, dtype=source.dtype)
+            group = coop.this_warp().group_by(width)
+            for r in range(rounds):
+                coop.load(
+                    group, source, items, algorithm="transpose", offset=r * tile
+                )
+                for i in range(ITEMS):
+                    items[i] = items[i] + r
+                coop.store(
+                    group, output, items, algorithm="transpose", offset=r * tile
+                )
+
+    source = np.arange(rounds * tile, dtype=np.float32) * 5 + 1
+    d_out = cuda.device_array_like(source)
+    kernel[1, THREADS](cuda.to_device(source), d_out)
+    expected = source + np.repeat(np.arange(rounds, dtype=np.float32), tile)
+    np.testing.assert_array_equal(d_out.copy_to_host(), expected)
+
+
+def test_transposes_on_warps_of_different_widths_and_the_block_in_one_kernel():
+    coop = coop_common
+    tile = THREADS * ITEMS
+
+    @cuda.jit
+    def kernel(source, output):
+        items = coop.ThreadData(ITEMS, dtype=source.dtype)
+        coop.load(coop.this_block(), source, items, algorithm="transpose")
+        coop.store(
+            coop.this_warp().group_by(16), output, items, algorithm="transpose"
+        )
+        coop.load(
+            coop.this_warp().group_by(4),
+            source,
+            items,
+            algorithm="transpose",
+            offset=tile,
+        )
+        coop.store(
+            coop.this_warp(), output, items, algorithm="transpose", offset=tile
+        )
+
+    source = np.arange(2 * tile, dtype=np.float32) + 1
+    d_out = cuda.device_array_like(source)
+    kernel[1, THREADS](cuda.to_device(source), d_out)
+    expected = np.zeros_like(source)
+    expected[_positions(16, "transpose")] = source[:tile].reshape(
+        THREADS, ITEMS
+    )
+    expected[tile + _positions(PHYSICAL, "transpose")] = source[
+        tile + _positions(4, "transpose")
+    ]
+    np.testing.assert_array_equal(d_out.copy_to_host(), expected)
+
+
+def test_a_transpose_in_a_multidimensional_block_uses_its_group_slot():
+    coop = coop_common
+    block = (16, 2, 2)
+    offset = 5
+
+    @cuda.jit
+    def kernel(source, output):
+        items = coop.ThreadData(ITEMS, dtype=source.dtype)
+        group = coop.this_warp().group_by(8)
+        coop.load(group, source, items, algorithm="transpose", offset=offset)
+        coop.store(group, output, items, algorithm="transpose")
+
+    size = THREADS * ITEMS + offset
+    source = np.arange(size, dtype=np.float32) * 2 + 1
+    d_out = cuda.to_device(np.zeros(THREADS * ITEMS, np.float32))
+    kernel[1, block](cuda.to_device(source), d_out)
+    np.testing.assert_array_equal(d_out.copy_to_host(), source[offset:])

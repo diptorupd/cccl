@@ -65,7 +65,14 @@ class TypedPipelineUnavailableError(ImportError):
 try:
     from numba_cuda_mlir import cuda, extending
     from numba_cuda_mlir._mlir import ir as mlir_ir
-    from numba_cuda_mlir._mlir.dialects import arith, func, gpu, llvm, memref
+    from numba_cuda_mlir._mlir.dialects import (
+        arith,
+        func,
+        gpu,
+        llvm,
+        memref,
+        nvvm,
+    )
     from numba_cuda_mlir._mlir.extras import types as mlir_types
     from numba_cuda_mlir.extending import (
         lowering_registry,
@@ -75,6 +82,7 @@ try:
     )
     from numba_cuda_mlir.lowering_utilities import (
         get_or_insert_function,
+        llvm_ptr_add_bytes,
         memref_data_pointer,
         user_signature_to_external_abi_signature,
     )
@@ -235,11 +243,13 @@ __all__ = [
     "gpu",
     "ir",
     "llvm",
+    "llvm_ptr_add_bytes",
     "lowering_registry",
     "memref",
     "memref_data_pointer",
     "mlir_ir",
     "mlir_types",
+    "nvvm",
     "rebind_targetoptions",
     "refresh_registries",
     "register_after_inference_rewrite",

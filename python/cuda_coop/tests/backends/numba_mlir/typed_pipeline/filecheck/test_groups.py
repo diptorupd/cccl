@@ -8,7 +8,10 @@ A kernel that only builds groups has no cooperative call to resolve, so it
 compiles; its typed IR shows each group's type, a logical warp's width
 included, and its MLIR shows that a group carries no run-time data. A load
 or store on a warp group plans its group's tile origin, and its MLIR
-computes that origin from the thread index and passes it as the offset.
+computes that origin from the thread index and passes it as the offset. A
+warp ``transpose`` plans one scratch slot per group instance and a barrier
+over the group; its MLIR offsets the scratch pointer to the thread's slot
+and synchronizes the group's lanes with ``syncwarp``.
 """
 
 # ruff: noqa: F841
@@ -131,6 +134,81 @@ def test_a_warp_site_passes_its_tile_origin_as_the_offset():
         CHECK:     [[WIDE:%.+]] = arith.index_cast [[ORIGIN]] : index to i64
         CHECK:     [[OFFSET:%.+]] = arith.addi [[WIDE]], %c5_i64
         CHECK:     func.call @{{.*}}warp_load{{.*}}, [[OFFSET]])
+        CHECK-NOT: gpu.barrier
+        """,
+        dump="mlir",
+        block=WARP_BLOCK,
+        chip=CHIP,
+    )
+
+
+def test_a_warp_transpose_plans_a_slot_per_group_instance():
+    @cuda.jit
+    def slots(source, output):
+        items = coop.ThreadData(4)
+        coop.load(coop.this_block(), source, items, algorithm="transpose")
+        coop.store(
+            coop.this_warp().group_by(8), output, items, algorithm="transpose"
+        )
+        coop.load(coop.this_warp(), source, items, algorithm="transpose")
+        coop.store(coop.this_warp(), output, items, algorithm="transpose")
+
+    testing.check(
+        slots,
+        f32_in_out(),
+        """
+        CHECK-LABEL: coop-plan slots
+        CHECK:         backing static size=3152 align=16
+        CHECK:         region implicit.0 offset=0 size=3152
+        CHECK:         site #0 load {{.*}} algorithm=transpose
+        CHECK-SAME:      region=implicit.0{{$}}
+        CHECK-NEXT:    barrier after #0{{$}}
+        CHECK:         site #1 store {{.*}} group=threads_within_warp/8
+        CHECK-SAME:      region=implicit.0+1024 stride=136
+        CHECK-NEXT:    barrier after #1 warp
+        CHECK:         site #2 load {{.*}} group=warp/32
+        CHECK-SAME:      region=implicit.0+2112 stride=520
+        CHECK-NEXT:    barrier after #2 warp
+        CHECK:         site #3 store {{.*}} group=warp/32
+        CHECK-SAME:      region=implicit.0+2112 stride=520
+        CHECK-NEXT:    barrier after #3 warp
+        """,
+        dump="plan",
+        block=WARP_BLOCK,
+        chip=CHIP,
+    )
+
+
+def test_a_warp_transpose_uses_its_slot_and_syncs_its_lanes():
+    @cuda.jit
+    def lanes(source, output):
+        items = coop.ThreadData(4)
+        coop.load(
+            coop.this_warp().group_by(8), source, items, algorithm="transpose"
+        )
+        coop.store(coop.this_warp(), output, items, algorithm="transpose")
+
+    testing.check(
+        lanes,
+        f32_in_out(),
+        """
+        CHECK:     [[TID:%.+]] = gpu.thread_id  x
+        CHECK:     [[GROUP:%.+]] = arith.divui [[TID]], %c8
+        CHECK:     [[SLOT:%.+]] = arith.muli [[GROUP]], %c136
+        CHECK:     [[BYTES:%.+]] = arith.index_cast [[SLOT]] : index to i64
+        CHECK:     [[SCRATCH:%.+]] = llvm.getelementptr {{%.+}}[[[BYTES]]]
+        CHECK:     func.call @{{.*}}WARP_LOAD_TRANSPOSE__8
+        CHECK-SAME:  (%{{.+}}, [[SCRATCH]],
+        CHECK:     [[LANE_TID:%.+]] = gpu.thread_id  x
+        CHECK:     [[LANE:%.+]] = arith.andi [[LANE_TID]], %c31
+        CHECK:     [[FIRST:%.+]] = arith.divui [[LANE]], %c8
+        CHECK:     [[SHIFT:%.+]] = arith.muli [[FIRST]], %c8
+        CHECK:     [[SHIFT32:%.+]] = arith.index_cast [[SHIFT]] : index to i32
+        CHECK:     [[MASK:%.+]] = arith.shli %c255_i32, [[SHIFT32]]
+        CHECK:     nvvm.bar.warp.sync [[MASK]]
+        CHECK:     arith.divui {{%.+}}, %c32
+        CHECK:     func.call @{{.*}}WARP_STORE_TRANSPOSE__32
+        CHECK:     nvvm.bar.warp.sync %c-1_i32
         CHECK-NOT: gpu.barrier
         """,
         dump="mlir",
