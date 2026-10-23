@@ -265,7 +265,8 @@ def test_a_coop_call_in_a_separate_device_function():
     with pytest.raises(
         Exception,
         match=r"coop\.load at line \d+ is inside .*load_into.*, a separately "
-        r"compiled device function",
+        r"compiled device function, .* cooperative calls in device function "
+        r".*load_into.* must be inlined into a kernel",
     ):
         _compile(kernel)
 

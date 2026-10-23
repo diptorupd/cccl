@@ -38,6 +38,7 @@ from typing import Any
 from . import _bridges as nb
 from ._errors import (
     DefaultDtypeMismatchError,
+    DeviceFunctionCallError,
     InconsistentLoopPayloadExtentError,
     PayloadJoinDtypeError,
     PayloadMemoryDtypeError,
@@ -555,12 +556,13 @@ def analyze(
     if targetoptions.get("device"):
         if found:
             _, kind, loc, _ = found[0]
-            raise TypedPipelineError(
-                f"coop.{kind} at line {getattr(loc, 'line', None)} "
-                f"is inside {func_id.func_qualname!r}, a separately "
-                "compiled device function, which has no launch to plan "
-                "for. Let the function inline (the cuda.jit default) "
-                "instead of inline='never'."
+            name = func_id.func_qualname
+            raise DeviceFunctionCallError(
+                f"coop.{kind} at line {getattr(loc, 'line', None)} is inside "
+                f"{name!r}, a separately compiled device function, which has "
+                "no launch to plan for: cooperative calls in device function "
+                f"{name!r} must be inlined into a kernel. Let the function "
+                "inline (the cuda.jit default) instead of inline='never'."
             )
         return None
     _check_reads(func_ir, typemap)

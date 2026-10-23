@@ -19,6 +19,7 @@ the call without it.
 from __future__ import annotations
 
 from .._compiler import _group_errors as planner
+from .._compiler._group_planner_support import GroupRewriteError
 from .._compiler._rewrite_support import CoopSinglePhaseRewriteError
 from . import _bridges as nb
 
@@ -157,6 +158,10 @@ class InconsistentLoopPayloadExtentError(
     __init__ = _init
 
 
+class DeviceFunctionCallError(GroupRewriteError, TypedPipelineError):
+    """A cooperative call in a separately compiled device function."""
+
+
 # Checked in order: a planner class before the builtin class it derives from.
 _TYPED_CLASSES = (
     (planner.MemoryDtypeMismatchError, PayloadMemoryDtypeError),
@@ -214,6 +219,7 @@ __all__ = [
     "CommonLoadPayloadError",
     "CommonStorePayloadError",
     "DefaultDtypeMismatchError",
+    "DeviceFunctionCallError",
     "InconsistentLoopPayloadExtentError",
     "InvalidGroupSelectorError",
     "InvalidLoadStoreAlgorithmError",
