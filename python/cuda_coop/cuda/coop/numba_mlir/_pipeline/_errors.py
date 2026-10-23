@@ -43,6 +43,10 @@ class StoreDtypeMismatchError(MemoryDtypeMismatchError, TypedPipelineError):
         TypedPipelineError.__init__(self, msg, loc=loc)
 
 
+class SharedMemoryAliasError(CoopSinglePhaseRewriteError, TypedPipelineError):
+    """A user shared array that cooperative scratch would overlap."""
+
+
 def unsupported_primitive(qualified_name: str) -> TypedPipelineError:
     """The error for a cooperative primitive the typed pipeline lacks."""
 
@@ -57,6 +61,7 @@ __all__ = [
     "MODE_HINT",
     "SUPPORTED_SURFACE",
     "PayloadJoinDtypeError",
+    "SharedMemoryAliasError",
     "StoreDtypeMismatchError",
     "TypedPipelineError",
     "unsupported_primitive",

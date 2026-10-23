@@ -22,7 +22,8 @@ change the IR. For each kernel it:
   static or runtime by where the value comes from, as coop's planner does,
   and checks them and any scalar ``store`` value by coop's rules;
 * builds each site's dims-free request with its controls;
-* measures the kernel's own static shared memory.
+* measures the kernel's own static shared memory and locates its dynamic
+  or runtime-sized shared arrays.
 
 Every error a user can fix in the kernel's source is raised here, before
 anything is specialized or compiled.
@@ -75,11 +76,14 @@ class Sites:
     """A kernel's checked call sites, in program order.
 
     ``user_shared_bytes`` is the static shared memory the kernel allocates
-    itself with ``cuda.shared.array``.
+    itself with ``cuda.shared.array``; ``user_dynamic_shared`` holds the
+    locations of the kernel's ``cuda.shared.array`` calls whose shape is
+    zero or not a compile-time constant.
     """
 
     sites: tuple[Site, ...]
     user_shared_bytes: int
+    user_dynamic_shared: tuple[Any, ...] = ()
 
 
 _RUNTIME = object()
@@ -216,6 +220,46 @@ def _user_static_shared_bytes(func_ir: Any, typemap: dict, calltypes) -> int:
                 bitwidth = getattr(result.dtype, "bitwidth", 8)
                 total += shape.literal_value * bitwidth // 8
     return total
+
+
+def _user_dynamic_shared(func_ir: Any, typemap: dict) -> tuple[Any, ...]:
+    """Locate the ``cuda.shared.array`` calls that are not statically sized.
+
+    As in coop's planner, a shape is static when it resolves to a constant
+    whose extents are all positive; a zero extent declares a view of the
+    launch's dynamic shared memory.
+    """
+
+    import operator
+
+    from .._compiler._rewrite_support import _INFERENCE_EXCEPTIONS
+
+    found = []
+    for label in sorted(func_ir.blocks):
+        for stmt in func_ir.blocks[label].body:
+            if not (
+                isinstance(stmt, nb.ir.Assign)
+                and isinstance(stmt.value, nb.ir.Expr)
+                and stmt.value.op == "call"
+                and _callee(typemap, stmt.value) is nb.cuda.shared.array
+            ):
+                continue
+            shape = _shape(stmt.value)
+            try:
+                shape = func_ir.infer_constant(shape)
+            except _INFERENCE_EXCEPTIONS:
+                ty = None if shape is None else typemap.get(shape.name)
+                shape = getattr(ty, "literal_value", None)
+            extents = shape if isinstance(shape, tuple) else (shape,)
+            try:
+                static = bool(extents) and all(
+                    e is not None and operator.index(e) > 0 for e in extents
+                )
+            except TypeError:
+                static = False
+            if not static:
+                found.append(stmt.loc)
+    return tuple(found)
 
 
 # The analysis -----------------------------------------------------------------
@@ -506,7 +550,11 @@ def analyze(
         return None
     _check_reads(func_ir, typemap)
     sites = tuple(analysis.site(*f) for f in found)
-    return Sites(sites, _user_static_shared_bytes(func_ir, typemap, calltypes))
+    return Sites(
+        sites,
+        _user_static_shared_bytes(func_ir, typemap, calltypes),
+        _user_dynamic_shared(func_ir, typemap),
+    )
 
 
 __all__ = ["Scalar", "Site", "Sites", "analyze"]

@@ -15,8 +15,12 @@ from types import SimpleNamespace
 import pytest
 
 from cuda.coop.numba_mlir._compiler._operations import StorageABI
+from cuda.coop.numba_mlir._pipeline import _bridges as nb
 from cuda.coop.numba_mlir._pipeline import _link, _specialize, _storage
-from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
+from cuda.coop.numba_mlir._pipeline._errors import (
+    SharedMemoryAliasError,
+    TypedPipelineError,
+)
 from cuda.coop.numba_mlir._pipeline._plan import Backing, Region
 from cuda.coop.numba_mlir._pipeline._specialize import LaunchBounds
 
@@ -88,6 +92,18 @@ def test_static_limit_includes_the_kernels_own_shared_bytes():
         "kernel's own 1040 bytes exceeds",
     ):
         _storage.layout([(LIMIT - 1024, 16)], 1040)
+
+
+def test_scratch_refuses_dynamic_user_shared_arrays():
+    user = (nb.ir.Loc("kernel.py", 3),)
+    _storage.layout([None], 0, user)
+    with pytest.raises(
+        SharedMemoryAliasError,
+        match=r"requires a 112-byte static shared-memory backing, but this "
+        r"kernel also declares dynamic/runtime-sized "
+        r"cuda\.shared\.array\(\.\.\.\) at kernel\.py \(3\)\. .*would alias",
+    ):
+        _storage.layout([(100, 4)], 0, user)
 
 
 def test_compiled_layouts_must_agree_with_the_planned_scratch(monkeypatch):

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import _link
-from ._errors import TypedPipelineError
+from ._errors import SharedMemoryAliasError, TypedPipelineError
 from ._plan import Backing, Region
 from ._specialize import Specialization
 
@@ -45,12 +45,19 @@ class StorageLayout:
 
 
 def layout(
-    needs: Sequence[tuple[int, int] | None], user_shared_bytes: int
+    needs: Sequence[tuple[int, int] | None],
+    user_shared_bytes: int,
+    user_dynamic_shared: Sequence[Any] = (),
 ) -> StorageLayout:
     """Lay out the sites' scratch ``needs``, one ``(size, alignment)`` each.
 
     A site without scratch needs ``None``. Every site shares one region, so
     the region is as large as the largest need, not their sum.
+
+    ``user_dynamic_shared`` holds the locations of the kernel's dynamic or
+    runtime-sized ``cuda.shared.array`` calls. Numba-CUDA-MLIR does not
+    keep the dynamic shared-memory window apart from static allocations, so
+    with scratch they are refused, as coop's planner refuses them.
     """
 
     scratch = tuple(need is not None for need in needs)
@@ -61,6 +68,21 @@ def layout(
     alignment = max(a for _, a in used)
     backing_alignment = max(_BACKING_ALIGNMENT, alignment)
     backing_size = -(-size // backing_alignment) * backing_alignment
+    if user_dynamic_shared:
+        where = ", ".join(
+            f"dynamic/runtime-sized cuda.shared.array(...) at {loc}"
+            for loc in user_dynamic_shared[:3]
+        )
+        raise SharedMemoryAliasError(
+            f"cuda.coop temporary storage requires a {backing_size}-byte "
+            f"static shared-memory backing, but this kernel also declares "
+            f"{where}. The supported numba-cuda-mlir compiler does not "
+            "separate these allocations; they would alias. Use statically "
+            "sized user shared arrays and keep the combined cooperative "
+            "backing within the static shared-memory limit, or move the "
+            "user data out of shared memory.",
+            loc=user_dynamic_shared[0],
+        )
     if backing_size + user_shared_bytes > STATIC_SHARED_LIMIT:
         raise TypedPipelineError(
             f"cooperative scratch needs {backing_size} bytes of shared "
@@ -83,6 +105,7 @@ def analyze(
     user_shared_bytes: int,
     identity: Any,
     context: Any,
+    user_dynamic_shared: Sequence[Any] = (),
 ) -> tuple[StorageLayout, _link.Bundle]:
     """Compile the specialization's bundle and lay out its scratch."""
 
@@ -98,7 +121,7 @@ def analyze(
                 f"ABI disagrees with its compiled scratch layout {need}"
             )
         needs.append(need)
-    return layout(needs, user_shared_bytes), bundle
+    return layout(needs, user_shared_bytes, user_dynamic_shared), bundle
 
 
 __all__ = [

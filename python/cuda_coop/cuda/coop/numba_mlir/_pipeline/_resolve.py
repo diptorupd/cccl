@@ -111,7 +111,11 @@ def _resolve_sites(
         targetoptions=targetoptions,
     )
     storage, bundle = _storage.analyze(
-        specialization, sites.user_shared_bytes, identity, context
+        specialization,
+        sites.user_shared_bytes,
+        identity,
+        context,
+        sites.user_dynamic_shared,
     )
     bounds = specialization.launch_bounds
     if bounds.rebind:
