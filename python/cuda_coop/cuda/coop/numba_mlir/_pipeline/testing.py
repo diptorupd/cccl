@@ -61,13 +61,14 @@ class Compiled:
 
 
 def compile_kernel(
-    kernel, signature, *, block=None, **targetoptions
+    kernel, signature, *, block=None, sharedmem=0, **targetoptions
 ) -> Compiled:
     """Compile ``kernel`` for ``signature`` without launching it.
 
     ``block`` stands in for the launch's block dimensions, which coop's
-    block groups take from the launch. Pass it and an explicit ``chip`` so
-    the result depends neither on a launch nor on the local GPU.
+    block groups take from the launch, and ``sharedmem`` for its dynamic
+    shared memory. Pass ``block`` and an explicit ``chip`` so the result
+    depends neither on a launch nor on the local GPU.
 
     ``kernel`` may be a dispatcher or a plain function; it is compiled
     through a fresh dispatcher with exactly ``targetoptions``, because
@@ -82,7 +83,7 @@ def compile_kernel(
         dispatcher.targetoptions["__launch_config__"] = {
             "grid": (1, 1, 1),
             "block": dims + (1,) * (3 - len(dims)),
-            "sharedmem": 0,
+            "sharedmem": sharedmem,
         }
     with capture() as cap:
         mlir = compiler.compile_mlir(dispatcher, signature)
@@ -98,11 +99,14 @@ def check(
     dump: str = "plan",
     prefixes: tuple[str, ...] = ("CHECK",),
     block=None,
+    sharedmem=0,
     **targetoptions,
 ) -> Compiled:
     """Compile ``kernel`` and FileCheck one of its dumps against ``checks``."""
 
-    compiled = compile_kernel(kernel, signature, block=block, **targetoptions)
+    compiled = compile_kernel(
+        kernel, signature, block=block, sharedmem=sharedmem, **targetoptions
+    )
     filecheck(checks, getattr(compiled, dump), prefixes=prefixes)
     return compiled
 

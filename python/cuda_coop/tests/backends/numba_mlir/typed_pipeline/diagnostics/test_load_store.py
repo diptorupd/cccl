@@ -16,6 +16,9 @@ from numba_cuda_mlir.numba_cuda.core.errors import TypingError
 
 import cuda.coop.numba_mlir as qualified_coop
 from cuda import coop
+from cuda.coop.numba_mlir._compiler._group_planner_support import (
+    GroupRewriteError,
+)
 from cuda.coop.numba_mlir._pipeline import testing
 from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
 
@@ -36,7 +39,7 @@ def _compile(kernel, signature=None, block=BLOCK):
     )
 
 
-def test_explicit_temp_storage_is_refused():
+def test_temp_storage_that_is_not_a_descriptor_is_refused():
     def kernel(source, output):
         block = coop.this_block()
         items = coop.ThreadData(4)
@@ -47,7 +50,9 @@ def test_explicit_temp_storage_is_refused():
         coop.store(block, output, items)
 
     with pytest.raises(
-        Exception, match=r"coop\.load: explicit temp_storage= is not"
+        GroupRewriteError,
+        match=r"cuda\.coop\.numba_mlir\.load temp_storage must resolve to a "
+        r"compile-time TempStorage descriptor",
     ):
         _compile(kernel)
 

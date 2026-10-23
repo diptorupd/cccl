@@ -5,42 +5,28 @@
 """A cooperative primitive the typed pipeline lacks is a typing error.
 
 It never falls back to the planner, and it never surfaces as Numba's generic
-"untyped global name" message.
+"untyped global name" message. Every kernel-callable primitive now has a
+template, so the refusal is tested on its own.
 """
 
 from __future__ import annotations
-
-import pytest
 
 from ._support import requires_typed_pipeline
 
 pytestmark = requires_typed_pipeline
 
-# Primitives outside the typed pipeline's first supported surface.
-_REJECTED = [
-    ("cuda.coop", "TempStorage"),
-    ("cuda.coop.numba_mlir", "TempStorage"),
-]
 
-
-@pytest.mark.parametrize("module_name, name", _REJECTED)
-def test_rejected_primitive_names_itself_and_the_switch(module_name, name):
-    import importlib
-
-    from numba_cuda_mlir import compiler, cuda, types
+def test_an_unsupported_primitive_names_itself_and_the_switch():
     from numba_cuda_mlir.numba_cuda.core.errors import TypingError
 
-    primitive = getattr(importlib.import_module(module_name), name)
+    from cuda.coop.numba_mlir._pipeline._errors import unsupported_primitive
 
-    @cuda.jit
-    def kernel(x):
-        primitive(x)
-
-    with pytest.raises(TypingError) as info:
-        compiler.compile_mlir(kernel, types.void(types.float32[::1]))
-    message = str(info.value)
-    assert f"{module_name}.{name} is not supported on the typed pipeline" in (
-        message
+    error = unsupported_primitive("cuda.coop.numba_mlir.example")
+    assert isinstance(error, TypingError)
+    message = str(error)
+    assert (
+        "cuda.coop.numba_mlir.example is not supported on the typed pipeline"
+        in message
     )
     assert "Unset CUDA_COOP_NUMBA_MLIR_PIPELINE" in message
 
