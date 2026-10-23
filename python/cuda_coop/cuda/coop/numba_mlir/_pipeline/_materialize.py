@@ -9,10 +9,12 @@ only one that changes the IR. It:
 
 * selects each site's provider method and pairs its operands with where
   lowering finds their values, as a ``CallEntry``;
-* prepends the scratch backing, a ``cuda.shared.array``, and the region's
-  slice of it to the kernel's entry block, with their types;
-* passes the region to every call that uses scratch, as the
-  ``SCRATCH_KEYWORD`` keyword argument.
+* prepends the scratch backing, a ``cuda.shared.array``, and a slice of it
+  for each offset a site's scratch starts at, to the kernel's entry block,
+  with their types. A dynamic backing is ``cuda.shared.array(0, ...)``, the
+  launch's dynamic shared memory;
+* passes each call that uses scratch its slice, as the ``SCRATCH_KEYWORD``
+  keyword argument.
 
 It takes no decisions and cannot fail on a user's kernel: every call entry
 is built before the IR is touched.
@@ -156,9 +158,16 @@ def _new_var(typemap, scope, name, ty, loc):
 
 
 def _emit_backing(func_ir, typemap, calltypes, typingctx, storage):
-    """Prepend the backing and the region's slice to the entry block."""
+    """Prepend the backing and its slices to the entry block.
 
-    size, alignment = storage.backing.size, storage.backing.alignment
+    Return the slice variable for each offset in ``storage.slices``; a slice
+    runs to the end of its site's region.
+    """
+
+    backing_size = storage.backing.size
+    if storage.backing.kind == "dynamic":
+        backing_size = 0
+    alignment = storage.backing.alignment
     entry = func_ir.blocks[min(func_ir.blocks)]
     scope, loc = entry.scope, entry.loc
     types = nb.types
@@ -170,7 +179,7 @@ def _emit_backing(func_ir, typemap, calltypes, typingctx, storage):
         types.Module(nb.cuda.shared), "array"
     )
     dtype_ty = typingctx.resolve_value_type(types.uint8)
-    size_ty = types.IntegerLiteral(size)
+    size_ty = types.IntegerLiteral(backing_size)
     align_ty = types.IntegerLiteral(alignment)
     array_fn = new_var("$coop_shared_array", array_fn_ty)
     size_var = new_var("$coop_backing_size", size_ty)
@@ -190,36 +199,50 @@ def _emit_backing(func_ir, typemap, calltypes, typingctx, storage):
         slice_fn_ty, (types.intp, types.intp), {}
     )
     slice_fn = new_var("$coop_slice", slice_fn_ty)
-    lo = new_var("$coop_region_lo", types.intp)
-    hi = new_var("$coop_region_hi", types.intp)
-    bounds = new_var("$coop_region_bounds", slice_sig.return_type)
-    slice_call = nb.ir.Expr.call(slice_fn, [lo, hi], (), loc)
-    calltypes[slice_call] = slice_sig
-    getitem = nb.ir.Expr.getitem(backing, bounds, loc)
     getitem_sig = typingctx.resolve_function_type(
         operator.getitem, (array_sig.return_type, slice_sig.return_type), {}
     )
-    calltypes[getitem] = getitem_sig
-    region = new_var("$coop_region_implicit", getitem_sig.return_type)
-
-    entry.body[:0] = [
+    body = [
         nb.ir.Assign(
             nb.ir.Global("shared_array", nb.cuda.shared.array, loc),
             array_fn,
             loc,
         ),
-        nb.ir.Assign(nb.ir.Const(size, loc), size_var, loc),
+        nb.ir.Assign(nb.ir.Const(backing_size, loc), size_var, loc),
         nb.ir.Assign(nb.ir.Global("uint8", types.uint8, loc), dtype_var, loc),
         nb.ir.Assign(nb.ir.Const(alignment, loc), align_var, loc),
         nb.ir.Assign(call, backing, loc),
         nb.ir.Assign(nb.ir.Global("slice", slice, loc), slice_fn, loc),
-        nb.ir.Assign(nb.ir.Const(0, loc), lo, loc),
-        nb.ir.Assign(nb.ir.Const(storage.region.size, loc), hi, loc),
-        nb.ir.Assign(slice_call, bounds, loc),
-        nb.ir.Assign(getitem, region, loc),
     ]
+    regions = {region.name: region for region in storage.regions}
+    views = {}
+    for slice_ in storage.slices:
+        if slice_ is None or slice_.offset in views:
+            continue
+        region = regions[slice_.region]
+        lo = new_var("$coop_region_lo", types.intp)
+        hi = new_var("$coop_region_hi", types.intp)
+        bounds = new_var("$coop_region_bounds", slice_sig.return_type)
+        slice_call = nb.ir.Expr.call(slice_fn, [lo, hi], (), loc)
+        calltypes[slice_call] = slice_sig
+        getitem = nb.ir.Expr.getitem(backing, bounds, loc)
+        calltypes[getitem] = getitem_sig
+        view = new_var(
+            f"$coop_region_{region.name.split('.')[0]}",
+            getitem_sig.return_type,
+        )
+        body += [
+            nb.ir.Assign(nb.ir.Const(slice_.offset, loc), lo, loc),
+            nb.ir.Assign(
+                nb.ir.Const(region.offset + region.size, loc), hi, loc
+            ),
+            nb.ir.Assign(slice_call, bounds, loc),
+            nb.ir.Assign(getitem, view, loc),
+        ]
+        views[slice_.offset] = view
+    entry.body[:0] = body
     func_ir._definitions = nb.build_definitions(func_ir.blocks)
-    return region
+    return views
 
 
 def materialize(
@@ -246,14 +269,14 @@ def materialize(
             strict=True,
         )
     }
-    if storage.region is None:
+    if storage.backing is None:
         return calls
-    region = _emit_backing(func_ir, typemap, calltypes, typingctx, storage)
-    for site, scratch in zip(sites, storage.scratch, strict=True):
-        if scratch:
+    views = _emit_backing(func_ir, typemap, calltypes, typingctx, storage)
+    for site, slice_ in zip(sites, storage.slices, strict=True):
+        if slice_ is not None:
             site.stmt.value.kws = (
                 *site.stmt.value.kws,
-                (SCRATCH_KEYWORD, region),
+                (SCRATCH_KEYWORD, views[slice_.offset]),
             )
     return calls
 

@@ -70,6 +70,7 @@ try:
     from numba_cuda_mlir.extending import (
         lowering_registry,
         require_launch_config,
+        set_required_dynamic_shared_memory,
         typing_registry,
     )
     from numba_cuda_mlir.lowering_utilities import (
@@ -246,6 +247,7 @@ __all__ = [
     "register_model",
     "require_launch_config",
     "resolve_gpu_target",
+    "set_required_dynamic_shared_memory",
     "signature",
     "types",
     "typing_registry",

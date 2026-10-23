@@ -240,7 +240,7 @@ def test_a_warp_request_completes_to_a_warp_provider_of_its_width(
     algorithm, factory
 ):
     for width in (8, 16, 32):
-        completed, kwargs = _specialize._complete(
+        completed, kwargs, _ = _specialize._complete(
             _request(_warp(width), algorithm), BLOCK
         )
         assert completed.__name__ == factory

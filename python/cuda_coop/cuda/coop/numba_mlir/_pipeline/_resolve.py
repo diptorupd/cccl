@@ -23,7 +23,8 @@ Only the last stage changes the IR, so a failure in any other leaves the
 function as typing left it. Stages 2 to 4 run in one
 ``compile_context_scope``, so the driver and every provider share one
 compile context without changing process-wide state. The driver applies the
-``launch_bounds`` that stage 2 chose, stores what lowering needs in
+``launch_bounds`` that stage 2 chose and the dynamic shared memory stage 3
+asked for, stores what lowering needs in
 ``state.metadata["coop_plan"]`` and reports the ``KernelPlan`` to
 ``_debug.record``.
 
@@ -48,7 +49,7 @@ def _describe(binding: Any) -> str:
     return str(value.item() if hasattr(value, "item") else value)
 
 
-def _site_plan(index, site, block, region, barrier_after) -> SitePlan:
+def _site_plan(index, site, block, slice_, barrier_after) -> SitePlan:
     request = site.request
     value = ()
     if site.scalar is not None:
@@ -72,7 +73,8 @@ def _site_plan(index, site, block, region, barrier_after) -> SitePlan:
             *value,
             *((name, _describe(binding)) for name, binding in request.controls),
         ),
-        region=region,
+        region=None if slice_ is None else slice_.region,
+        region_offset=0 if slice_ is None else slice_.region_offset,
         barrier_after=barrier_after,
     )
 
@@ -110,16 +112,15 @@ def _resolve_sites(
         target=target,
         targetoptions=targetoptions,
     )
-    storage, bundle = _storage.analyze(
-        specialization,
-        sites.user_shared_bytes,
-        identity,
-        context,
-        sites.user_dynamic_shared,
-    )
+    storage, bundle = _storage.analyze(specialization, sites, identity, context)
+    _storage.check_launch(storage, int(launch.get("sharedmem") or 0))
     bounds = specialization.launch_bounds
     if bounds.rebind:
         nb.rebind_targetoptions(state, launch_bounds=bounds.value)
+    if storage.dynamic_shared_bytes:
+        nb.set_required_dynamic_shared_memory(
+            state, storage.dynamic_shared_bytes
+        )
     calls = _materialize.materialize(
         func_ir,
         typemap,
@@ -135,18 +136,16 @@ def _resolve_sites(
     plan.launch_bounds = bounds.value
     plan.bundle = bundle.specializations
     plan.backing = storage.backing
-    if storage.region is not None:
-        plan.regions.append(storage.region)
-    for index, (site, scratch, barrier) in enumerate(
+    plan.regions.extend(storage.regions)
+    for index, (site, slice_, barrier) in enumerate(
         zip(
             sites.sites,
-            storage.scratch,
+            storage.slices,
             specialization.barrier_after,
             strict=True,
         )
     ):
-        region = storage.region.name if scratch else None
-        plan.sites.append(_site_plan(index, site, block, region, barrier))
+        plan.sites.append(_site_plan(index, site, block, slice_, barrier))
     return calls
 
 

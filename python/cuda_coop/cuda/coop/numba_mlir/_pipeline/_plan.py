@@ -47,6 +47,7 @@ class SitePlan:
 
     ``request`` holds the completed specialization's parameters in the
     order they are printed, for example ``(("algorithm", "transpose"),)``.
+    ``region_offset`` is where the site's scratch starts in ``region``.
     """
 
     index: int
@@ -54,6 +55,7 @@ class SitePlan:
     line: int | None
     request: tuple[tuple[str, object], ...] = ()
     region: str | None = None
+    region_offset: int = 0
     barrier_before: bool = False
     barrier_after: bool = False
 
@@ -84,6 +86,8 @@ def _site_line(site: SitePlan) -> str:
         text += f" {key}={value}"
     if site.region is not None:
         text += f" region={site.region}"
+        if site.region_offset:
+            text += f"+{site.region_offset}"
     return text
 
 

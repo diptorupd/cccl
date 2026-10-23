@@ -12,7 +12,9 @@ the checked sites and the launch's block it:
   kernel's target, with one compile context for all of them;
 * decides ``launch_bounds`` from the block's thread count;
 * decides which sites take scratch, from each provider's storage ABI, and
-  places a barrier after every one of them, as coop's planner does.
+  places a barrier after each one whose plan asks for a storage-reuse
+  barrier: every site with implicit scratch, and the sites of a
+  ``TempStorage`` with ``auto_sync=True``, as coop's planner does.
 
 Specializing generates provider source and nothing more: this stage does
 not call NVRTC, so scratch use is decided before any size is known. It does
@@ -57,11 +59,15 @@ class Specialization:
 
 # Request completion ----------------------------------------------------------
 
-_COMPLETIONS: dict[tuple, tuple[Any, dict]] = {}
+_COMPLETIONS: dict[tuple, tuple[Any, dict, bool]] = {}
 
 
-def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
-    """Return the provider factory and its arguments for ``request``.
+def _complete(
+    request: LoadStoreRequest, block: tuple
+) -> tuple[Any, dict, bool]:
+    """Return the provider factory, its arguments and the reuse barrier.
+
+    The barrier is whether the plan asks for one after the call.
 
     ``plan_group_primitive`` hashes the request's semantic key, which is
     costly, so its result is memoized per request and block. A warp group
@@ -76,7 +82,11 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
 
     from ..._core import ArgumentBinding
     from ..._core.group._dispatch import plan_group_primitive
-    from ..._core.group._model import GroupLoweringTarget, StorageOwnership
+    from ..._core.group._model import (
+        GroupLoweringTarget,
+        StorageOwnership,
+        SynchronizationScope,
+    )
     from ..._core.launch import LaunchFacts
     from .._compiler import _group_errors as planner
     from .._lowering import _load_store
@@ -124,7 +134,12 @@ def _complete(request: LoadStoreRequest, block: tuple) -> tuple[Any, dict]:
     }
     if request.binding("oob_default") is not None:
         kwargs["oob_default"] = request.binding("oob_default")
-    completed = (getattr(_load_store, factory_name), kwargs)
+    barrier = (
+        not storage_free
+        and plan.synchronization.storage_reuse_barrier
+        is not SynchronizationScope.NONE
+    )
+    completed = (getattr(_load_store, factory_name), kwargs, barrier)
     _COMPLETIONS[key] = completed
     return completed
 
@@ -146,7 +161,7 @@ def _instantiate(
         collect_specializations() as collected,
     ):
         for request in requests:
-            factory, kwargs = _complete(request, block)
+            factory, kwargs, _ = _complete(request, block)
             factory(**kwargs)
     if len(collected) != len(requests):
         raise AssertionError("a provider factory did not specialize once")
@@ -185,20 +200,26 @@ def plan(
     site_algorithms: Sequence[Any],
     block: tuple,
     targetoptions: dict,
+    barriers: Sequence[bool] | None = None,
 ) -> Specialization:
     """Decide scratch, barriers and ``launch_bounds`` for specialized sites.
 
-    A barrier follows every call that uses scratch.
+    ``barriers`` holds whether each site's plan asks for a reuse barrier;
+    by default every call that uses scratch does.
     """
 
     launch_bounds = plan_launch_bounds(block, targetoptions)
     scratch = tuple(uses_scratch(a) for a in site_algorithms)
+    if barriers is None:
+        barriers = scratch
     return Specialization(
         block=block,
         algorithms=tuple(algorithms),
         site_algorithms=tuple(site_algorithms),
         scratch=scratch,
-        barrier_after=scratch,
+        barrier_after=tuple(
+            s and b for s, b in zip(scratch, barriers, strict=True)
+        ),
         launch_bounds=launch_bounds,
     )
 
@@ -233,6 +254,7 @@ def specialize(
         [algorithm_for[s.request] for s in sites.sites],
         block,
         targetoptions,
+        [_complete(s.request, block)[2] for s in sites.sites],
     )
 
 
