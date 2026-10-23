@@ -227,13 +227,13 @@ class _Analysis:
     def __init__(self, func_ir, typemap, args):
         self.func_ir, self.typemap, self.args = func_ir, typemap, tuple(args)
 
-    def collect(self) -> list[tuple[Any, str, int | None, bool]]:
+    def collect(self) -> list[tuple[Any, str, Any, bool]]:
         found = []
-        line = None
+        loc = None
         for label in sorted(self.func_ir.blocks):
             for stmt in self.func_ir.blocks[label].body:
                 if not is_wrapper_location(stmt.loc):
-                    line = stmt.loc.line
+                    loc = stmt.loc
                 if (
                     isinstance(stmt, nb.ir.Assign)
                     and isinstance(stmt.value, nb.ir.Expr)
@@ -243,18 +243,20 @@ class _Analysis:
                     kind = OPERATIONS.get(callee)
                     if kind is not None:
                         found.append(
-                            (stmt, kind, line, callee in QUALIFIED_OPERATIONS)
+                            (stmt, kind, loc, callee in QUALIFIED_OPERATIONS)
                         )
         return found
 
-    def site(self, stmt, kind, line, qualified) -> Site:
+    def site(self, stmt, kind, loc, qualified) -> Site:
         expr = stmt.value
+        line = None if loc is None else loc.line
         request = request_for(
             kind,
             [self.typemap[a.name] for a in expr.args],
             {k: self.typemap[v.name] for k, v in expr.kws},
             qualified=qualified,
             extent=self._array_extent(stmt, kind) if qualified else None,
+            loc=loc,
         )
         scalar = self._store_scalar(stmt, kind, request.dtype)
         request = with_controls(
@@ -493,9 +495,9 @@ def analyze(
     found = analysis.collect()
     if targetoptions.get("device"):
         if found:
-            _, kind, line, _ = found[0]
+            _, kind, loc, _ = found[0]
             raise TypedPipelineError(
-                f"coop.{kind} at line {line} "
+                f"coop.{kind} at line {getattr(loc, 'line', None)} "
                 f"is inside {func_id.func_qualname!r}, a separately "
                 "compiled device function, which has no launch to plan "
                 "for. Let the function inline (the cuda.jit default) "

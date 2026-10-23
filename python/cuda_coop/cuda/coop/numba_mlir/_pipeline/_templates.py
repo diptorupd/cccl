@@ -569,15 +569,48 @@ def _request(
     return _intern(kind, group, dtype, items, algorithm)
 
 
+def _check_memory(kind: str, memory: Any, loc: Any) -> None:
+    """Require the memory operand coop's providers take, as the planner does.
+
+    A provider's memory parameter is a ``Pointer``, which receives only the
+    array's base address, so its type is a one-dimensional C-contiguous
+    array. Typing accepts any array; a strided view or a multi-dimensional
+    array would be read as contiguous memory from its base.
+    """
+
+    from .._types import Pointer
+
+    required = Pointer(memory.dtype).dtype()
+    if (memory.ndim, memory.layout) == (required.ndim, required.layout):
+        return
+    line = "" if loc is None else f" at line {loc.line}"
+    raise TypedPipelineError(
+        f"coop.{kind}{line}: {_MEMORY[kind]} must be a one-dimensional "
+        f"C-contiguous array, got {memory} ({memory.ndim}-D, layout "
+        f"{memory.layout!r}). The provider receives only the array's base "
+        "address and would read a strided or multi-dimensional array as "
+        "contiguous memory. Pass a contiguous one-dimensional array or "
+        "slice, such as a[start:stop], or copy the data into one.",
+        loc=loc,
+    )
+
+
 def request_for(
-    kind: str, args, kws, *, qualified: bool = False, extent: int | None = None
+    kind: str,
+    args,
+    kws,
+    *,
+    qualified: bool = False,
+    extent: int | None = None,
+    loc: Any = None,
 ) -> LoadStoreRequest:
     """Return the request a typed call built, from its argument types.
 
     ``extent`` is the extent of a plain-array payload, which its type does
-    not carry.
+    not carry. ``loc`` is the kernel location of the public call.
     """
 
+    _check_memory(kind, _bind_operation(kind, args, kws)[_MEMORY[kind]], loc)
     request = _request(kind, args, kws, qualified=qualified, extent=extent)
     if request is None or request is _PENDING_EXTENT:
         raise AssertionError(f"coop.{kind} reached call resolution untyped")
