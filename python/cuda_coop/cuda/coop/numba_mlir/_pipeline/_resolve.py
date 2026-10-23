@@ -37,7 +37,14 @@ from __future__ import annotations
 from typing import Any
 
 from . import _bridges as nb
-from . import _debug, _materialize, _sites, _specialize, _storage
+from . import (
+    _debug,
+    _materialize,
+    _ncm_fixes,
+    _sites,
+    _specialize,
+    _storage,
+)
 from ._materialize import CallEntry, CoopPlan
 from ._plan import KernelPlan, SitePlan
 
@@ -122,7 +129,8 @@ def _resolve_sites(
         targetoptions=targetoptions,
     )
     storage, bundle = _storage.analyze(specialization, sites, identity, context)
-    _storage.check_launch(storage, int(launch.get("sharedmem") or 0))
+    if not _ncm_fixes.present(_ncm_fixes.FIRST_LAUNCH_SHARED_MEMORY):
+        _storage.check_launch(storage, int(launch.get("sharedmem") or 0))
     bounds = specialization.launch_bounds
     if bounds.rebind:
         nb.rebind_targetoptions(state, launch_bounds=bounds.value)

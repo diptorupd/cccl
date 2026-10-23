@@ -284,6 +284,10 @@ def test_scratch_above_the_static_limit():
         coop.store(block, output, items)
 
     signature = types.void(types.float64[::1], types.float64[::1])
+    if native("FIRST_LAUNCH_SHARED_MEMORY"):
+        compiled = _compile(kernel, signature, block=(1024, 1, 1))
+        assert "backing dynamic" in compiled.plan
+        return
     with pytest.raises(
         TypedPipelineError,
         match=r"cooperative scratch needs \d+ bytes .* the 49152-byte static "

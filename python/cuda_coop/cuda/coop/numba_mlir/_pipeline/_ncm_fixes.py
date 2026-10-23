@@ -5,14 +5,16 @@
 """Numba-CUDA-MLIR fixes the typed pipeline relies on, found by probing.
 
 A fix is detected by what the installed compiler does, never by its
-version: each probe runs Numba-CUDA-MLIR's own type inference, or its
-argument binding, on a small function that behaves as expected only with
-the fix, and checks the result. A compiler with the fix backported passes,
-and one that has the fix's names but not its behaviour fails.
+version: each probe runs Numba-CUDA-MLIR's own type inference, its
+argument binding or its dispatcher's compile callback, on a small function
+that behaves as expected only with the fix, and checks the result. A
+compiler with the fix backported passes, and one that has the fix's names
+but not its behaviour fails.
 
 The probes need no GPU and change no registry: the imprecise value the
 refinement probes refine comes from a function type passed as an argument.
-The argument-binding probe initializes no compiler context.
+The argument-binding probe initializes no compiler context, and the
+launch probe compiles and launches nothing.
 Each probe runs once per process, at the typed pipeline's first compile
 (``_prepare``) or when ``present`` is first asked about its fix.
 
@@ -34,6 +36,7 @@ from numba_cuda_mlir import cuda, types
 from . import _bridges as nb
 
 try:
+    from numba_cuda_mlir import descriptor
     from numba_cuda_mlir.descriptor import mlir_target
     from numba_cuda_mlir.numba_cuda.compiler import run_frontend
     from numba_cuda_mlir.numba_cuda.core import typeinfer
@@ -315,8 +318,56 @@ ARGUMENT_BINDING = Fix(
 )
 
 
+# Dynamic shared memory on the compiling launch (N2) -------------------------
+
+
+def _unlaunched():
+    pass
+
+
+def _relaunches_for_dynamic_shared_memory() -> bool:
+    """A launch whose on-demand compile is the first to require dynamic
+    shared memory is aborted, to be relaunched with the bytes.
+
+    The native launcher calls the dispatcher's ``_compile`` and launches
+    what it returns with the launch's own ``sharedmem``. The probe stands
+    in for the compile, which records the requirement on the dispatcher,
+    on a throwaway dispatcher it never launches.
+    """
+
+    relaunch = getattr(descriptor, "_RelaunchForDynamicSharedMemory", None)
+    dispatcher = cuda.jit(_unlaunched)
+    if relaunch is None or (
+        getattr(dispatcher, "_requires_dynamic_shared_memory", None)
+        is not False
+    ):
+        return False
+
+    def compile_requiring(args):
+        dispatcher._requires_dynamic_shared_memory = True
+        return b"", "_unlaunched", False
+
+    dispatcher._compile_impl = compile_requiring
+    try:
+        dispatcher._compile(())
+    except relaunch:
+        return True
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return False
+
+
+FIRST_LAUNCH_SHARED_MEMORY = Fix(
+    name="first-launch dynamic shared memory",
+    ask="N2",
+    pull=None,
+    probe=_relaunches_for_dynamic_shared_memory,
+)
+
+
 __all__ = [
     "ARGUMENT_BINDING",
+    "FIRST_LAUNCH_SHARED_MEMORY",
     "LOCAL_ARRAY_SHAPE",
     "PHI_REFINEMENT",
     "TUPLE_REFINEMENT",

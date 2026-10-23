@@ -19,7 +19,7 @@ import cuda.coop as coop_common
 import cuda.coop.numba_mlir as coop_backend
 from cuda.coop.numba_mlir._pipeline._errors import TempStorageError
 
-from .._support import requires_typed_pipeline
+from .._support import native, requires_typed_pipeline
 
 pytestmark = requires_typed_pipeline
 
@@ -99,7 +99,7 @@ def test_scratch_above_the_static_limit_runs_in_dynamic_shared_memory():
     _run(kernel, sharedmem=DYNAMIC)
 
 
-def test_a_dynamic_backing_the_launch_does_not_request_is_refused():
+def test_a_dynamic_backing_the_launch_omits_runs_exactly_with_the_fix():
     coop = coop_common
 
     @cuda.jit
@@ -112,5 +112,14 @@ def test_a_dynamic_backing_the_launch_does_not_request_is_refused():
         )
         coop.store(block, output, items)
 
-    with pytest.raises(TempStorageError, match="launch requests 0"):
+    if native("FIRST_LAUNCH_SHARED_MEMORY"):
         _run(kernel)
+        _run(kernel)
+        _run(kernel, sharedmem=1024)
+    else:
+        with pytest.raises(
+            TempStorageError,
+            match="launch requests 0. .* needs Numba-CUDA-MLIR's first-launch "
+            "dynamic shared memory fix",
+        ):
+            _run(kernel)

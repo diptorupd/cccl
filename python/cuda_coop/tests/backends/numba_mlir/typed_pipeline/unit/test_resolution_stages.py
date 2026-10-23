@@ -302,7 +302,11 @@ def test_a_dynamic_backing_needs_the_launch_to_request_it():
     )
     _storage.check_launch(layout, 64 * 1024)
     _storage.check_launch(_storage.layout([(256, 16)]), 0)
-    with pytest.raises(TempStorageError, match="launch requests 0"):
+    with pytest.raises(
+        TempStorageError,
+        match="launch requests 0. .* needs Numba-CUDA-MLIR's first-launch "
+        "dynamic shared memory fix",
+    ):
         _storage.check_launch(layout, 0)
 
 

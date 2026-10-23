@@ -30,7 +30,13 @@ from cuda.coop.numba_mlir._pipeline._errors import (
     TempStorageError,
 )
 
-from .._support import BLOCK, CHIP, f32_in_out, requires_typed_pipeline
+from .._support import (
+    BLOCK,
+    CHIP,
+    f32_in_out,
+    native,
+    requires_typed_pipeline,
+)
 
 pytestmark = requires_typed_pipeline
 
@@ -211,11 +217,20 @@ def _dynamic_kernel(alignment=None):
     return kernel
 
 
-def test_a_dynamic_backing_needs_the_launch_to_request_it(device_limits):
+def test_a_dynamic_backing_the_launch_omits_compiles_exactly_with_the_fix(
+    device_limits,
+):
+    if native("FIRST_LAUNCH_SHARED_MEMORY"):
+        compiled = _compile(_dynamic_kernel())
+        assert "backing dynamic size=65536 align=16" in compiled.plan
+        return
     with pytest.raises(
         TempStorageError,
         match=r"cooperative scratch needs 65536 bytes of dynamic shared "
-        r"memory, .* but the launch requests 0",
+        r"memory, .* but the launch requests 0\. Applying a compile's dynamic "
+        r"shared-memory requirement to the launch that compiles the kernel "
+        r"needs Numba-CUDA-MLIR's first-launch dynamic shared memory fix "
+        r"\(not yet proposed upstream\)",
     ):
         _compile(_dynamic_kernel())
 

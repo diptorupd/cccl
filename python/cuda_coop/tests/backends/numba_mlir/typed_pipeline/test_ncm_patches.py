@@ -694,3 +694,15 @@ def test_the_wrappers_keep_keyword_only_controls_exactly_with_the_fix():
         fixes.ARGUMENT_BINDING
     )
     assert coop.load.py_func.__name__ == "load"
+
+
+# Dynamic shared memory on the compiling launch (N2) -------------------------
+
+
+def test_the_first_launch_shared_memory_probe_agrees_with_the_compiler():
+    from numba_cuda_mlir import descriptor
+
+    fixes = _ncm_fixes()
+    assert fixes.present(fixes.FIRST_LAUNCH_SHARED_MEMORY) == hasattr(
+        descriptor, "_RelaunchForDynamicSharedMemory"
+    )

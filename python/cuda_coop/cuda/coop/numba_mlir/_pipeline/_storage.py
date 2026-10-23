@@ -26,9 +26,10 @@ Numba-CUDA-MLIR does not keep the dynamic shared-memory window apart from
 static allocations: its dynamic window is an internal one-byte static
 variable, so a static array would overlap the window. A dynamic backing is
 therefore refused next to any user shared array, and a static one next to a
-user array that is itself dynamic, as coop's planner refuses both. The
-launch that compiles a kernel with a dynamic backing must also request the
-bytes itself (``check_launch``).
+user array that is itself dynamic, as coop's planner refuses both. Without
+Numba-CUDA-MLIR's first-launch dynamic shared memory fix, the launch that
+compiles a kernel with a dynamic backing must also request the bytes
+itself (``check_launch``).
 
 Which sites take scratch was decided before the compile, from each
 provider's storage ABI; the compiled layouts must agree. ``layout`` is pure
@@ -42,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import _link
+from . import _ncm_fixes as fixes
 from ._errors import (
     SharedMemoryAliasError,
     TempStorageError,
@@ -339,10 +341,12 @@ def layout(
 def check_launch(storage: StorageLayout, sharedmem: int) -> None:
     """Require a launch that compiles a dynamic backing to request it.
 
-    Numba-CUDA-MLIR applies a compile's required dynamic shared memory to
-    later launches, but not to the launch that runs the compile unless a
-    whole-function planner is registered, and the typed pipeline registers
-    none. That launch would run with ``sharedmem`` bytes and fault.
+    For a compiler without the first-launch dynamic shared memory fix
+    (``_ncm_fixes.FIRST_LAUNCH_SHARED_MEMORY``): it applies a compile's
+    required dynamic shared memory to a launch only when a whole-function
+    planner is registered, and the typed pipeline registers none. The
+    launch that runs the compile would run with ``sharedmem`` bytes and
+    fault.
     """
 
     required = storage.dynamic_shared_bytes
@@ -351,11 +355,14 @@ def check_launch(storage: StorageLayout, sharedmem: int) -> None:
     raise TempStorageError(
         f"cooperative scratch needs {required} bytes of dynamic shared "
         f"memory, above the {STATIC_SHARED_LIMIT}-byte static limit, but the "
-        f"launch requests {sharedmem}. Numba-CUDA-MLIR does not apply a "
-        "compile's dynamic shared-memory requirement to the launch that "
-        "compiles the kernel, so on the typed pipeline the launch must "
-        f"request it: kernel[grid, block, stream, {required}](...). Or "
-        "reduce the scratch to the static limit."
+        f"launch requests {sharedmem}. "
+        + fixes.missing(
+            fixes.FIRST_LAUNCH_SHARED_MEMORY,
+            "Applying a compile's dynamic shared-memory requirement to the "
+            "launch that compiles the kernel",
+        )
+        + f" Request the bytes in the launch: kernel[grid, block, stream, "
+        f"{required}](...), or reduce the scratch to the static limit."
     )
 
 
