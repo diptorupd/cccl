@@ -179,6 +179,61 @@ def test_load_arrangement(algorithm):
     np.testing.assert_array_equal(d_out.copy_to_host(), expected)
 
 
+@pytest.mark.parametrize(
+    "spelling, striped",
+    [("Striped", True), (" WARP-TRANSPOSE ", False), ("warp-transpose", False)],
+    ids=["Striped", "spaced-WARP-TRANSPOSE", "warp-transpose"],
+)
+@pytest.mark.parametrize(
+    "coop", [coop_common, coop_backend], ids=["common", "backend"]
+)
+def test_algorithm_case_space_and_hyphens_are_ignored(coop, spelling, striped):
+    @cuda.jit
+    def arrangement(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(4)
+        coop.load(block, source, items, algorithm=spelling)
+        base = cuda.threadIdx.x * 4
+        for i in range(4):
+            output[base + i] = items[i]
+
+    source = _source()
+    d_out = cuda.device_array_like(source)
+    arrangement[1, THREADS](cuda.to_device(source), d_out)
+    if striped:
+        expected = source.reshape(ITEMS, THREADS).T.ravel()
+    else:
+        expected = source
+    np.testing.assert_array_equal(d_out.copy_to_host(), expected)
+
+
+@pytest.mark.parametrize(
+    "spelling, dtype",
+    [
+        (int, np.int32),
+        (float, np.float32),
+        ("float32", np.float32),
+        ("np.float32", np.float32),
+        ("int16", np.int16),
+    ],
+    ids=["int", "float", "float32", "np.float32", "int16"],
+)
+def test_dtype_spellings_coop_accepts(spelling, dtype):
+    coop = coop_common
+
+    @cuda.jit
+    def round_trip(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(4, dtype=spelling)
+        coop.load(block, source, items)
+        coop.store(block, output, items)
+
+    source = _source(dtype)
+    d_out = cuda.device_array_like(source)
+    round_trip[1, THREADS](cuda.to_device(source), d_out)
+    np.testing.assert_array_equal(d_out.copy_to_host(), source)
+
+
 def test_extent_from_a_kernel_argument():
     coop = coop_common
 

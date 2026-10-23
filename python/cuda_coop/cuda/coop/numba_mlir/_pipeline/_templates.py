@@ -171,11 +171,30 @@ def _omitted(ty: Any) -> bool:
 
 
 def _payload_dtype(ty: Any) -> Any:
+    """Return the dtype a ``dtype=`` argument's type names, or ``None``.
+
+    Accepts the spellings coop's planner accepts: a Numba or NumPy scalar
+    type, the Python classes ``bool``, ``int``, ``float`` and ``complex``,
+    and a type name string.
+    """
+
+    from .._compiler._parameters import normalize_dtype_param
+
     if isinstance(ty, nb.types.NumberClass):
         return ty.instance_type
     if isinstance(ty, nb.types.DType):
         return ty.dtype
+    if isinstance(ty, nb.types.Function) and ty.typing_key in _PYTHON_DTYPES:
+        return normalize_dtype_param(ty.typing_key)
+    if isinstance(ty, nb.types.StringLiteral):
+        try:
+            return normalize_dtype_param(ty.literal_value)
+        except ValueError as exc:
+            raise TypedPipelineValueError(str(exc)) from None
     return None
+
+
+_PYTHON_DTYPES = (bool, int, float, complex)
 
 
 # this_block and this_warp ----------------------------------------------------
@@ -473,6 +492,10 @@ def _algorithm(kind: str, ty: Any, qualified: bool) -> str:
 
     from ..._core.group.load_store import GroupLoadStoreAlgorithm
     from .._compiler import _group_errors as planner
+    from .._compiler._load_store_algorithms import (
+        _BLOCK_LOAD_STORE_ALGORITHMS,
+        _resolve_algorithm,
+    )
 
     if _omitted(ty):
         return "direct"
@@ -485,14 +508,19 @@ def _algorithm(kind: str, ty: Any, qualified: bool) -> str:
             f"{_api(kind, qualified)} algorithm must be a string, got {ty}"
         )
     try:
-        return GroupLoadStoreAlgorithm(ty.literal_value).value
+        token = _resolve_algorithm(
+            ty.literal_value,
+            _BLOCK_LOAD_STORE_ALGORITHMS,
+            _api(kind, qualified),
+        )
     except ValueError:
-        choices = ", ".join(sorted(a.value for a in GroupLoadStoreAlgorithm))
+        choices = ", ".join(sorted(_BLOCK_LOAD_STORE_ALGORITHMS))
         if qualified:
             exc = planner.InvalidLoadStoreAlgorithmError(kind, choices, "block")
             raise InvalidLoadStoreAlgorithmError(planner_text(exc)) from None
         exc = planner.InvalidGroupSelectorError(kind, "algorithm", choices)
         raise InvalidGroupSelectorError(planner_text(exc)) from None
+    return GroupLoadStoreAlgorithm(token).value
 
 
 def _check_group(kind: str, group: Any) -> None:
