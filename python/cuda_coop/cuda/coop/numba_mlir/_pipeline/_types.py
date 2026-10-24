@@ -1,0 +1,337 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. ALL RIGHTS RESERVED.
+#
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+"""Numba types for cooperative groups and per-thread payloads.
+
+``CoopGroupType`` is the type of ``this_block()``, ``this_warp()`` and a
+``group_by()`` partition of either. It carries coop's own ``ThreadGroup``
+request and no launch dimensions; call resolution reads the block from the
+launch once typing is done.
+
+``ThreadDataType`` is the type of ``ThreadData(items, dtype=...)``. It is a
+one-dimensional C-contiguous ``types.Array``, so indexing and every array
+operation type as usual, with the extent and the strength of the evidence
+that fixed its dtype added to the type key. Strength is what lets typing
+apply coop's precedence instead of "first refinement wins":
+
+=============  ========================================================
+Strength       Evidence
+=============  ========================================================
+explicit       ``dtype=`` on the constructor
+producer       the payload is the output of a ``load``
+store-dst      the payload is the value of a ``store`` (its destination)
+write          an indexed write ``td[i] = value``
+=============  ========================================================
+
+Stronger evidence replaces weaker evidence at a join; equal evidence that
+disagrees is a conflict, which the operation's template reports. A join with
+a plain ``types.Array`` is a typing error: the plain array's extent is not
+part of its type, so no cooperative operation could be specialized on it.
+
+``TempStorageType`` is the type of ``TempStorage(...)``: an opaque
+compile-time descriptor of caller-provided scratch. Its options are part of
+the type key as typing saw them; an option typing cannot fold (``64 * 1024``,
+a NumPy integer) is ``FROM_IR`` and call resolution reads it from the IR.
+Descriptors with different options meeting in one variable type as a
+descriptor without options, which call resolution rejects.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from . import _bridges as nb
+from ._errors import TypedPipelineError
+
+WRITE, STORE_DST, PRODUCER, EXPLICIT = 0, 1, 2, 3
+
+STRENGTH_NAMES = {
+    EXPLICIT: "explicit",
+    PRODUCER: "producer",
+    STORE_DST: "store-dst",
+    WRITE: "write",
+}
+
+
+WARP_GROUP_KINDS = frozenset({"warp", "threads_within_warp"})
+
+
+class CoopGroupType(nb.types.Type):
+    """A cooperative group request, without launch dimensions.
+
+    The key is the group's semantic key: its kind and, for a ``group_by``
+    partition, the partition's count and coverage. A logical warp's width
+    is therefore part of the type, and two widths never share a request.
+
+    Parameters
+    ----------
+    group : cuda.coop._core.thread_group.ThreadGroup
+        The descriptor coop's own ``this_block()``, ``this_warp()`` or
+        ``group_by()`` returns on the host.
+    """
+
+    def __init__(self, group: Any) -> None:
+        self.group = group
+        detail = ""
+        if group.mapping is not None:
+            detail = f", {group.mapping.count}"
+            if not group.mapping.exhaustive:
+                detail += ", partial"
+        super().__init__(name=f"coop.group[{group.kind}{detail}]")
+
+    @property
+    def key(self) -> tuple:
+        return ("coop.group", self.group.semantic_key)
+
+    @property
+    def kind(self) -> str:
+        return self.group.kind
+
+    @property
+    def is_block(self) -> bool:
+        return self.group.kind == "block"
+
+    @property
+    def is_warp(self) -> bool:
+        """Whether the group is a physical or a logical warp."""
+
+        return self.group.kind in WARP_GROUP_KINDS
+
+    @property
+    def width(self) -> int | None:
+        """A warp group's thread count (``LOGICAL_WARP_THREADS``)."""
+
+        return self.group.static_size if self.is_warp else None
+
+
+class RefusedGroupType(nb.types.Type):
+    """A group whose construction coop refuses, typed so typing can finish.
+
+    A typing template's exception reaches the user as a plain
+    ``TypingError``, so ``group_by`` types a refused partition as this type
+    instead, and a check at the last fixed point of typing
+    (``_groups.refused_groups``) raises ``error`` with its class.
+
+    Parameters
+    ----------
+    error : type
+        The exception class to raise.
+    message : str
+        Its message.
+    parameter : str or None
+        The ``group_by`` argument that was not a compile-time constant, if
+        that is the refusal.
+    """
+
+    def __init__(
+        self, error: type, message: str, parameter: str | None = None
+    ) -> None:
+        self.error, self.message, self.parameter = error, message, parameter
+        super().__init__(name=f"coop.group[refused: {message}]")
+
+    @property
+    def key(self) -> tuple:
+        return ("coop.group.refused", self.error, self.message, self.parameter)
+
+
+class ThreadDataType(nb.types.Array):
+    """A per-thread payload: an array whose extent is part of its type.
+
+    Parameters
+    ----------
+    dtype : numba type
+        Element type, or ``types.undefined`` until evidence arrives.
+    items : int
+        Items per thread.
+    strength : int
+        Strength of the evidence that fixed ``dtype``; ignored while the
+        dtype is undefined.
+    alignment : int or None
+        The constructor's ``alignment=``. It is an attribute of the
+        allocation, not of the value, so it is not part of the key.
+    """
+
+    def __init__(
+        self,
+        dtype: Any,
+        items: int,
+        strength: int = EXPLICIT,
+        alignment: int | None = None,
+    ) -> None:
+        self.items = int(items)
+        precise = dtype.is_precise()
+        self.strength = strength if precise else WRITE
+        self.alignment = alignment
+        tag = f", {STRENGTH_NAMES[self.strength]}" if precise else ""
+        super().__init__(
+            dtype,
+            1,
+            "C",
+            name=f"coop.ThreadData({dtype}, items={self.items}{tag})",
+        )
+
+    @property
+    def key(self) -> tuple:
+        return (self.dtype, self.items, self.strength, None)
+
+    def __repr__(self) -> str:
+        return self.name
+
+    def with_dtype(self, dtype: Any, strength: int) -> ThreadDataType:
+        return ThreadDataType(dtype, self.items, strength, self.alignment)
+
+    def refined(self, dtype: Any, strength: int) -> ThreadDataType:
+        """Apply new dtype evidence of ``strength`` to this payload.
+
+        Conflicting evidence of equal or lower strength leaves the payload
+        unchanged, so that the operation's template reports the conflict.
+        """
+
+        if not self.dtype.is_precise():
+            return self.with_dtype(dtype, strength)
+        if self.dtype == dtype:
+            return self.with_dtype(dtype, max(self.strength, strength))
+        if strength > self.strength:
+            return self.with_dtype(dtype, strength)
+        return self
+
+    def copy(self, dtype=None, ndim=None, layout=None, readonly=None):
+        # A dtype-only copy is how Numba refines an array from an indexed
+        # write. Any other copy is a view, which is a plain array.
+        if ndim is None and layout is None and not readonly:
+            if dtype is None:
+                return self
+            if not self.dtype.is_precise():
+                return self.with_dtype(dtype, WRITE)
+            return self.with_dtype(dtype, self.strength)
+        return nb.types.Array(
+            self.dtype if dtype is None else dtype,
+            self.ndim if ndim is None else ndim,
+            self.layout if layout is None else layout,
+            readonly=bool(readonly),
+        )
+
+    def unify(self, typingctx, other):
+        if isinstance(other, nb.types.Array) and not isinstance(
+            other, ThreadDataType
+        ):
+            raise TypedPipelineError(
+                f"coop.ThreadData ({self}) cannot share a variable with a "
+                f"plain array ({other}): its extent is not part of the "
+                "array's type. Use coop.ThreadData on every path."
+            )
+        if not isinstance(other, ThreadDataType) or other.items != self.items:
+            return None
+        if not other.dtype.is_precise():
+            return self.with_dtype(self.dtype, self.strength)
+        if not self.dtype.is_precise():
+            return self.with_dtype(other.dtype, other.strength)
+        if self.dtype == other.dtype:
+            return self.with_dtype(
+                self.dtype, max(self.strength, other.strength)
+            )
+        if self.strength != other.strength:
+            win = self if self.strength > other.strength else other
+            return self.with_dtype(win.dtype, win.strength)
+        return None
+
+    def can_convert_to(self, typingctx, other):
+        if (
+            isinstance(other, ThreadDataType)
+            and other.items == self.items
+            and (not self.dtype.is_precise() or other.dtype == self.dtype)
+        ):
+            return nb.Conversion.exact
+        return super().can_convert_to(typingctx, other)
+
+
+FROM_IR = "from-ir"
+
+TEMP_STORAGE_OPTIONS = ("size_in_bytes", "alignment", "auto_sync", "sharing")
+
+
+class TempStorageType(nb.types.Type):
+    """A ``TempStorage`` descriptor.
+
+    Parameters
+    ----------
+    options : tuple or None
+        The constructor's ``TEMP_STORAGE_OPTIONS`` as typing saw them: a
+        literal value, ``None`` when omitted, or ``FROM_IR``. ``None`` for
+        descriptors with different options joined in one variable.
+    """
+
+    def __init__(self, options: tuple | None) -> None:
+        self.options = options
+        if options is None:
+            shown = "mixed"
+        else:
+            shown = ", ".join(
+                f"{name}={value!r}"
+                for name, value in zip(TEMP_STORAGE_OPTIONS, options)
+                if value is not None
+            )
+        super().__init__(name=f"coop.TempStorage({shown})")
+
+    @property
+    def key(self) -> tuple:
+        return ("coop.TempStorage", self.options)
+
+    def unify(self, typingctx, other):
+        if isinstance(other, TempStorageType):
+            return self if other == self else TempStorageType(None)
+        return None
+
+    def can_convert_to(self, typingctx, other):
+        if isinstance(other, TempStorageType) and other.options is None:
+            return nb.Conversion.safe
+        return super().can_convert_to(typingctx, other)
+
+
+def is_temp_storage(ty: Any) -> bool:
+    """Whether ``ty`` is a descriptor, possibly joined with ``None``."""
+
+    if isinstance(ty, nb.types.Optional):
+        ty = ty.type
+    return isinstance(ty, TempStorageType)
+
+
+class _I8Model(nb.PrimitiveModel):
+    """A group or descriptor is a placeholder byte with no run-time data."""
+
+    def __init__(self, dmm, fe_type):
+        super().__init__(dmm, fe_type, nb.mlir_ir.IntegerType.get_signless(8))
+
+
+_registered = False
+
+
+def register() -> None:
+    """Register the data models of the cooperative types once."""
+
+    global _registered
+    if _registered:
+        return
+    nb.register_model(CoopGroupType)(_I8Model)
+    nb.register_model(TempStorageType)(_I8Model)
+    nb.register_model(ThreadDataType)(nb.ArrayModel)
+    _registered = True
+
+
+__all__ = [
+    "EXPLICIT",
+    "FROM_IR",
+    "PRODUCER",
+    "STORE_DST",
+    "STRENGTH_NAMES",
+    "TEMP_STORAGE_OPTIONS",
+    "WARP_GROUP_KINDS",
+    "WRITE",
+    "CoopGroupType",
+    "RefusedGroupType",
+    "TempStorageType",
+    "ThreadDataType",
+    "is_temp_storage",
+    "register",
+]

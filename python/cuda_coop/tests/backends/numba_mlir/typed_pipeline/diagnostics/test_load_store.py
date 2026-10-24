@@ -1,0 +1,324 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. ALL RIGHTS RESERVED.
+#
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+"""What the typed pipeline refuses for load and store, and how it says so.
+
+A refusal names the argument or the construct and is raised at compile
+time; none falls back to the planner.
+"""
+
+from __future__ import annotations
+
+import pytest
+from numba_cuda_mlir import cuda, types
+from numba_cuda_mlir.numba_cuda.core.errors import TypingError
+
+import cuda.coop.numba_mlir as qualified_coop
+from cuda import coop
+from cuda.coop.numba_mlir._compiler._group_planner_support import (
+    GroupRewriteError,
+)
+from cuda.coop.numba_mlir._pipeline import testing
+from cuda.coop.numba_mlir._pipeline._errors import TypedPipelineError
+
+from .._support import (
+    BLOCK,
+    CHIP,
+    f32_in_out,
+    native,
+    requires_typed_pipeline,
+)
+
+pytestmark = requires_typed_pipeline
+
+
+def _compile(kernel, signature=None, block=BLOCK):
+    return testing.compile_kernel(
+        kernel, signature or f32_in_out(), block=block, chip=CHIP
+    )
+
+
+def test_temp_storage_that_is_not_a_descriptor_is_refused():
+    def kernel(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(4)
+        scratch = cuda.shared.array(4096, types.uint8)
+        coop.load(
+            block, source, items, algorithm="transpose", temp_storage=scratch
+        )
+        coop.store(block, output, items)
+
+    with pytest.raises(
+        GroupRewriteError,
+        match=r"cuda\.coop\.numba_mlir\.load temp_storage must resolve to a "
+        r"compile-time TempStorage descriptor",
+    ):
+        _compile(kernel)
+
+
+def _zero_items(source, output):
+    items = coop.ThreadData(0)
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _qualified_zero_items(source, output):
+    items = qualified_coop.ThreadData(0)
+    qualified_coop.load(qualified_coop.this_block(), source, items)
+    qualified_coop.store(qualified_coop.this_block(), output, items)
+
+
+def _alignment_not_a_power_of_two(source, output):
+    items = coop.ThreadData(4, alignment=3)
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _bool_alignment(source, output):
+    items = coop.ThreadData(4, alignment=True)
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _runtime_alignment(source, output):
+    items = coop.ThreadData(4, alignment=source.shape[0])
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+def _unknown_dtype_name(source, output):
+    items = coop.ThreadData(4, dtype="float33")
+    coop.load(coop.this_block(), source, items)
+    coop.store(coop.this_block(), output, items)
+
+
+@pytest.mark.parametrize(
+    "kernel, message",
+    [
+        (_zero_items, r"items_per_thread must be a positive integer, got 0"),
+        (
+            _qualified_zero_items,
+            r"items_per_thread must be a positive integer, got 0",
+        ),
+        (_alignment_not_a_power_of_two, r"alignment must be a power of 2"),
+        (_bool_alignment, r"alignment must be a compile-time integer"),
+        (_runtime_alignment, r"alignment must be a compile-time integer"),
+        (_unknown_dtype_name, r"float33"),
+    ],
+    ids=[
+        "zero_items",
+        "qualified_zero_items",
+        "alignment_not_a_power_of_two",
+        "bool_alignment",
+        "runtime_alignment",
+        "unknown_dtype_name",
+    ],
+)
+def test_a_thread_data_argument_coop_refuses_names_the_reason(kernel, message):
+    with pytest.raises(TypingError, match=message) as info:
+        _compile(kernel)
+    assert "Cannot request literal type" not in str(info.value)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Numba-CUDA-MLIR reports a literal request it cannot satisfy for "
+    "a value that is not a kernel argument as 'Cannot request literal type.'",
+)
+def test_a_runtime_items_per_thread_expression_names_the_reason():
+    def kernel(source, output):
+        items = coop.ThreadData(source.shape[0] // 32)
+        coop.load(coop.this_block(), source, items)
+        coop.store(coop.this_block(), output, items)
+
+    with pytest.raises(TypingError, match=r"items_per_thread"):
+        _compile(kernel)
+
+
+def test_a_group_other_than_the_block_is_refused():
+    def kernel(source, output):
+        items = coop.ThreadData(4)
+        coop.load(1, source, items)
+        coop.store(coop.this_block(), output, items)
+
+    with pytest.raises(
+        Exception, match=r"load requires a compile-time ThreadGroup from this_"
+    ):
+        _compile(kernel)
+
+
+def test_the_common_api_refuses_a_local_array_load_payload():
+    def kernel(source, output):
+        items = cuda.local.array(4, types.float32)
+        coop.load(coop.this_block(), source, items)
+        output[0] = items[0]
+
+    with pytest.raises(
+        Exception,
+        match=r"cuda\.coop\.load requires output to be a fixed-size "
+        r"ThreadData payload in the common API; use cuda\.coop\.numba_mlir",
+    ):
+        _compile(kernel)
+
+
+def test_the_common_api_refuses_a_local_array_store_payload():
+    def kernel(source, output):
+        items = cuda.local.array(4, types.float32)
+        for i in range(4):
+            items[i] = source[i]
+        coop.store(coop.this_block(), output, items)
+
+    with pytest.raises(
+        Exception,
+        match=r"cuda\.coop\.store accepts only a scalar or fixed-size "
+        r"ThreadData value payload in the common API",
+    ):
+        _compile(kernel)
+
+
+def test_a_qualified_array_payload_needs_a_local_array_constructor():
+    def kernel(source, output):
+        qualified_coop.store(qualified_coop.this_block(), output, source)
+
+    with pytest.raises(
+        TypedPipelineError,
+        match=r"cuda\.coop\.numba_mlir\.store requires a static "
+        r"items_per_thread extent before provider selection",
+    ):
+        _compile(kernel)
+
+
+def test_qualified_local_array_payloads_must_agree_on_the_extent():
+    def kernel(source, output, flag):
+        if flag[0]:
+            items = cuda.local.array(2, types.float32)
+        else:
+            items = cuda.local.array(4, types.float32)
+        qualified_coop.load(qualified_coop.this_block(), source, items)
+        output[0] = items[0]
+
+    signature = types.void(*f32_in_out().args, types.int32[::1])
+    with pytest.raises(
+        TypedPipelineError,
+        match=r"cuda\.coop\.numba_mlir loop-carried payloads have "
+        r"inconsistent items_per_thread extents",
+    ):
+        _compile(kernel, signature)
+
+
+def test_an_unknown_algorithm_lists_the_known_ones():
+    def kernel(source, output):
+        items = coop.ThreadData(4)
+        coop.load(coop.this_block(), source, items, algorithm="diagonal")
+        coop.store(coop.this_block(), output, items)
+
+    with pytest.raises(
+        Exception,
+        match=r"cuda\.coop\.load algorithm must be one of: direct, striped, "
+        r"transpose, vectorize, warp_transpose, warp_transpose_timesliced",
+    ):
+        _compile(kernel)
+
+
+def test_writes_that_disagree_without_coop_evidence():
+    def kernel(source, output):
+        items = coop.ThreadData(4)
+        base = cuda.threadIdx.x * 4
+        items[0] = 2.5
+        for i in range(1, 4):
+            items[i] = 1
+        for i in range(4):
+            output[base + i] = items[i]
+
+    with pytest.raises(
+        TypedPipelineError,
+        match=r"'items': its writes disagree on the dtype",
+    ):
+        _compile(kernel)
+
+
+def test_a_load_and_a_store_of_other_dtypes_through_a_tuple_alias():
+    def kernel(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(4)
+        alias = (items,)[0]
+        coop.load(block, source, alias)
+        coop.store(block, output, items)
+
+    if native("TUPLE_REFINEMENT"):
+        message = (
+            r"payload dtype float32 conflicts with destination dtype int32"
+        )
+    else:
+        message = r"tuple refinement fix \(NVIDIA/numba-cuda-mlir#396"
+    signature = types.void(types.float32[::1], types.int32[::1])
+    with pytest.raises(TypingError, match=message):
+        _compile(kernel, signature)
+
+
+def test_a_coop_call_in_a_separate_device_function():
+    @cuda.jit(device=True, inline="never")
+    def load_into(source, items):
+        coop.load(coop.this_block(), source, items)
+
+    def kernel(source, output):
+        items = coop.ThreadData(4, dtype=source.dtype)
+        load_into(source, items)
+        coop.store(coop.this_block(), output, items)
+
+    with pytest.raises(
+        Exception,
+        match=r"coop\.load at line \d+ is inside .*load_into.*, a separately "
+        r"compiled device function, .* cooperative calls in device function "
+        r".*load_into.* must be inlined into a kernel",
+    ):
+        _compile(kernel)
+
+
+def test_scratch_above_the_static_limit():
+    def kernel(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(8)
+        coop.load(block, source, items, algorithm="transpose")
+        coop.store(block, output, items)
+
+    signature = types.void(types.float64[::1], types.float64[::1])
+    if native("FIRST_LAUNCH_SHARED_MEMORY"):
+        compiled = _compile(kernel, signature, block=(1024, 1, 1))
+        assert "backing dynamic" in compiled.plan
+        return
+    with pytest.raises(
+        TypedPipelineError,
+        match=r"cooperative scratch needs \d+ bytes .* the 49152-byte static "
+        r"limit",
+    ):
+        _compile(kernel, signature, block=(1024, 1, 1))
+
+
+def test_scratch_counts_the_kernels_own_shared_memory():
+    def kernel(source, output):
+        block = coop.this_block()
+        own = cuda.shared.array(48000, types.uint8)
+        own[cuda.threadIdx.x] = 0
+        items = coop.ThreadData(4)
+        coop.load(block, source, items, algorithm="transpose")
+        coop.store(block, output, items)
+
+    with pytest.raises(
+        TypedPipelineError, match=r"with the kernel's own 48000 bytes"
+    ):
+        _compile(kernel)
+
+
+def test_launch_bounds_below_the_launch_block():
+    def kernel(source, output):
+        block = coop.this_block()
+        items = coop.ThreadData(4)
+        coop.load(block, source, items)
+        coop.store(block, output, items)
+
+    with pytest.raises(TypedPipelineError, match=r"more than launch_bounds=64"):
+        testing.compile_kernel(
+            kernel, f32_in_out(), block=BLOCK, chip=CHIP, launch_bounds=64
+        )

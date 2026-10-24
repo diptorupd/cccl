@@ -21,13 +21,13 @@ This guide assumes you have written a CUDA kernel and know how threads,
 blocks, and device arrays work. The examples use Numba-CUDA-MLIR. The
 :doc:`installation instructions <../coop>` describe the matching
 ``cuda-coop`` extra; the current backend requires
-``numba-cuda-mlir>=0.5.0,<0.6``. Check the
+``numba-cuda-mlir>=0.5.0,<0.7``. Check the
 :ref:`validation scope <coop-numba-validation>` for environment coverage.
 Keep a compiled kernel in its original CUDA context; see the
 :ref:`device and context-lifetime limitation <coop-numba-context-lifetime>`
 before reusing a dispatcher across devices or recreated contexts.
 
-This guide describes the experimental Numba-CUDA-MLIR 0.5.x API.
+This guide describes the experimental Numba-CUDA-MLIR 0.5.x and 0.6.x API.
 Operation support varies by group and backend. The examples below use
 supported block and warp operations.
 
@@ -36,7 +36,7 @@ supported block and warp operations.
 Requirements
 ------------
 
-Use Python 3.10 through 3.14 and ``numba-cuda-mlir>=0.5.0,<0.6``. The
+Use Python 3.10 through 3.14 and ``numba-cuda-mlir>=0.5.0,<0.7``. The
 :doc:`installation instructions <../coop>` describe the ``cuda-coop`` extra
 matching your CUDA major version. Running the examples requires a
 CUDA-capable GPU. The developer guide's
