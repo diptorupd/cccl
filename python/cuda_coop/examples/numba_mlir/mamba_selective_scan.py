@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Run the Mamba v1 selective scan with one block per (batch, channel) row. Each time step is an
-   affine map packed into a uint64; a block-wide inclusive scan composes them, and a carry links
-successive tiles.
+"""Run the Mamba v1 selective scan with one block per (batch, channel) row.
+Each time step is an affine map packed into a uint64; a block-wide inclusive
+scan composes them, and a carry links successive tiles.
 """
 
 from __future__ import annotations
@@ -12,11 +12,14 @@ from __future__ import annotations
 import numpy as np
 from numba_cuda_mlir import cuda, types
 from numba_cuda_mlir.cuda import libdevice
+from numba_cuda_mlir.cuda.experimental import consteval
 
 import cuda.coop.numba_mlir as coop
 
-THREADS = 128
-ITEMS_PER_THREAD = 4
+# consteval needs a compile-time integer and cannot read a kernel argument, so
+# the item count is a module constant; edit it to change the configuration.
+THREADS = 256
+ITEMS_PER_THREAD = 8
 MAX_STATE = 256
 
 
@@ -41,7 +44,7 @@ def pair_b(pair):
 
 @cuda.jit(device=True)
 def apply_softplus(s):
-    """Softplus with the threshold at 20: log(1 + exp(s)) for s <= 20, otherwise s"""
+    """Softplus with the threshold at 20: log(1 + exp(s)) for s <= 20, else s"""
     if s > types.float32(20.0):
         return s
     return libdevice.log1pf(libdevice.expf(s))
@@ -118,25 +121,26 @@ def selective_scan_kernel(
     has_z,
     has_bias,
     softplus,
-    items_per_thread,
 ):
     block = coop.this_block()
     thread = cuda.threadIdx.x
     row = cuda.blockIdx.x
     batch, channel = row // dim, row % dim
-    u_td = coop.ThreadData(items_per_thread)
-    delta_td = coop.ThreadData(items_per_thread)
-    pairs = coop.ThreadData(items_per_thread)
+    u_td = coop.ThreadData(items_per_thread=ITEMS_PER_THREAD)
+    delta_td = coop.ThreadData(items_per_thread=ITEMS_PER_THREAD)
+    b_td = coop.ThreadData(items_per_thread=ITEMS_PER_THREAD)
+    c_td = coop.ThreadData(items_per_thread=ITEMS_PER_THREAD)
+    pairs = coop.ThreadData(items_per_thread=ITEMS_PER_THREAD)
     agg = coop.ThreadData(items_per_thread=1)
-    y_td = coop.ThreadData(items_per_thread)
+    y_td = coop.ThreadData(items_per_thread=ITEMS_PER_THREAD)
 
     h_carry = cuda.shared.array(MAX_STATE, types.float32)
     for n in range(thread, nstate, THREADS):
         h_carry[n] = types.float32(0.0)
-    
-    block.sync()
 
-    tile_items = THREADS * items_per_thread
+    block.sync_aligned()
+
+    tile_items = THREADS * ITEMS_PER_THREAD
     ntiles = (length + tile_items - 1) // tile_items
 
     for tile in range(ntiles):
@@ -162,7 +166,7 @@ def selective_scan_kernel(
             oob_default=0,
         )
 
-        for i in range(items_per_thread):
+        for i in consteval(range(ITEMS_PER_THREAD)):
             s = delta_td[i]
             if has_bias:
                 s = s + bias[channel]
@@ -175,11 +179,59 @@ def selective_scan_kernel(
             A_value = a[a_index(channel, nstate, n)]
             h_in = h_carry[n]
 
-            for i in range(items_per_thread):
-                t = start + thread * items_per_thread + i
-    
+            B_fixed = types.float32(0.0)
+            if variable_b:
+                coop.load(
+                    block,
+                    b,
+                    b_td,
+                    offset=weight_index(
+                        batch,
+                        channel,
+                        n,
+                        start,
+                        dim,
+                        nstate,
+                        length,
+                        b_groups,
+                        variable_b,
+                    ),
+                    algorithm="warp_transpose",
+                    valid_items=valid,
+                    oob_default=0,
+                )
+            else:
+                B_fixed = b[a_index(channel, nstate, n)]
+            C_fixed = types.float32(0.0)
+            if variable_c:
+                coop.load(
+                    block,
+                    c,
+                    c_td,
+                    offset=weight_index(
+                        batch,
+                        channel,
+                        n,
+                        start,
+                        dim,
+                        nstate,
+                        length,
+                        c_groups,
+                        variable_c,
+                    ),
+                    algorithm="warp_transpose",
+                    valid_items=valid,
+                    oob_default=0,
+                )
+            else:
+                C_fixed = c[a_index(channel, nstate, n)]
+
+            for i in consteval(range(ITEMS_PER_THREAD)):
+                t = start + thread * ITEMS_PER_THREAD + i
                 if t < length:
-                    B_value = b[weight_index(batch, channel, n, t, dim, nstate, length, b_groups, variable_b)]
+                    B_value = B_fixed
+                    if variable_b:
+                        B_value = b_td[i]
                     alpha = libdevice.expf(delta_td[i] * A_value)
                     beta = delta_td[i] * B_value * u_td[i]
                     pairs[i] = types.uint64(pack_pair(alpha, beta))
@@ -195,28 +247,30 @@ def selective_scan_kernel(
                 algorithm="warp_scans",
                 aggregate_output=agg,
             )
-            for i in range(items_per_thread):
-                t = start + thread * items_per_thread + i
+            for i in consteval(range(ITEMS_PER_THREAD)):
+                t = start + thread * ITEMS_PER_THREAD + i
                 if t < length:
-                    C_value = c[weight_index(batch, channel, n, t, dim, nstate, length, c_groups, variable_c)]
+                    C_value = C_fixed
+                    if variable_c:
+                        C_value = c_td[i]
                 else:
                     C_value = types.float32(0.0)
                 p = scan_result[i]
                 h = pair_a(p) * h_in + pair_b(p)
                 y_td[i] = types.float32(y_td[i] + C_value * h)
-            
-            h_new = pair_a(agg[0]) * h_in + pair_b(agg[0])
-            if thread == 0: 
-                h_carry[n] = h_new
-            block.sync()
 
-        for i in range(items_per_thread):
-            t = start + thread * items_per_thread + i
+            h_new = pair_a(agg[0]) * h_in + pair_b(agg[0])
+            if thread == 0:
+                h_carry[n] = h_new
+            block.sync_aligned()
+
+        for i in consteval(range(ITEMS_PER_THREAD)):
+            t = start + thread * ITEMS_PER_THREAD + i
             v = y_td[i]
             if has_d:
                 v += d[channel] * u_td[i]
             if t < length and has_z:
-                v *=silu(z[seq_index(row, length, t)])
+                v *= silu(z[seq_index(row, length, t)])
             y_td[i] = types.float32(v)
 
         coop.store(
@@ -227,11 +281,10 @@ def selective_scan_kernel(
             algorithm="warp_transpose",
             valid_items=valid,
         )
-        
-        block.sync()
 
-    
-    for n in range(thread, nstate, THREADS): 
+        block.sync_aligned()
+
+    for n in range(thread, nstate, THREADS):
         last_state[state_index(row, nstate, n)] = h_carry[n]
 
 
@@ -245,13 +298,14 @@ def selective_scan(
     z=None,
     delta_bias=None,
     delta_softplus=False,
-    items_per_thread=ITEMS_PER_THREAD,
 ):
     """Return output and canonical final state for finite float32 inputs.
 
     u/delta: (batch, dim, length); A: (dim, state), 1 <= state <= 256.
-    B/C: (dim, state), (batch, state, length), or (batch, groups, state, length).
+    B/C: (dim, state), (batch, state, length) or (batch, groups, state, length).
     Groups must divide dim. Optional D/bias: (dim,); z: u.shape.
+    Each block of THREADS threads scans tiles of THREADS * ITEMS_PER_THREAD
+    time steps.
     This teaching wrapper copies arrays and synchronizes each invocation.
     """
 
@@ -325,7 +379,6 @@ def selective_scan(
         z is not None,
         delta_bias is not None,
         bool(delta_softplus),
-        items_per_thread,
     )
     return output.copy_to_host().reshape(u.shape), last.copy_to_host().reshape(
         batch, dim, nstate
@@ -347,7 +400,7 @@ def _expand_weight(weight, batch, dim, nstate, length):
 def selective_scan_reference(
     u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False
 ):
-    """Serial float64 reference with the same arguments as ``selective_scan``."""
+    """Serial float64 reference; same arguments as ``selective_scan``."""
     u = u.astype(np.float64)
     batch, dim, length = u.shape
     A = A.astype(np.float64)
@@ -375,12 +428,12 @@ def selective_scan_reference(
     return v, h
 
 
-def run_example(items_per_thread: int = ITEMS_PER_THREAD) -> float:
-    """Check lengths, states, B/C layouts, and options; return the max output error."""
+def run_example() -> float:
+    """Check lengths, states, B/C layouts, and options; return the max error."""
 
     rng = np.random.default_rng(0)
     batch, dim, groups = 2, 4, 2
-    tile_items = THREADS * items_per_thread
+    tile_items = THREADS * ITEMS_PER_THREAD
 
     def weight(layout, nstate, length):
         shape = {
@@ -402,26 +455,25 @@ def run_example(items_per_thread: int = ITEMS_PER_THREAD) -> float:
     ]
     worst = 0.0
     for length, nstate, b_layout, c_layout, options in configs:
-        u = rng.standard_normal((batch, dim, length), dtype=np.float32)
+        shape = (batch, dim, length)
+        u = rng.standard_normal(shape, dtype=np.float32)
         A = -rng.uniform(0.5, 2.0, (dim, nstate)).astype(np.float32)
         B = weight(b_layout, nstate, length)
         C = weight(c_layout, nstate, length)
         if options:
             # Pre-activation delta: softplus maps it to small positive steps.
-            delta = rng.normal(-3.0, 1.0, (batch, dim, length)).astype(np.float32)
-            extra = dict(
-                D=rng.standard_normal(dim, dtype=np.float32),
-                z=rng.standard_normal((batch, dim, length), dtype=np.float32),
-                delta_bias=rng.uniform(-0.5, 0.5, dim).astype(np.float32),
-                delta_softplus=True,
-            )
+            delta = rng.normal(-3.0, 1.0, shape).astype(np.float32)
+            extra = {
+                "D": rng.standard_normal(dim, dtype=np.float32),
+                "z": rng.standard_normal(shape, dtype=np.float32),
+                "delta_bias": rng.uniform(-0.5, 0.5, dim).astype(np.float32),
+                "delta_softplus": True,
+            }
         else:
-            delta = rng.uniform(0.01, 0.1, (batch, dim, length)).astype(np.float32)
+            delta = rng.uniform(0.01, 0.1, shape).astype(np.float32)
             extra = {}
 
-        output, last_state = selective_scan(
-            u, delta, A, B, C, **extra, items_per_thread=items_per_thread
-        )
+        output, last_state = selective_scan(u, delta, A, B, C, **extra)
         want_output, want_state = selective_scan_reference(
             u, delta, A, B, C, **extra
         )
@@ -432,11 +484,11 @@ def run_example(items_per_thread: int = ITEMS_PER_THREAD) -> float:
 
 
 def main() -> int:
-    for items_per_thread in (1, 4):
-        error = run_example(items_per_thread)
-        print(
-            f"items_per_thread={items_per_thread}: max output error {error:.2e}"
-        )
+    error = run_example()
+    print(
+        f"threads={THREADS}, items_per_thread={ITEMS_PER_THREAD}: "
+        f"max output error {error:.2e}"
+    )
     return 0
 
 
